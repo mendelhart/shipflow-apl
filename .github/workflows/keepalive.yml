@@ -1,0 +1,16 @@
+# Supabase pauses a free project after 7 days with no activity. One cheap
+# read a day keeps it awake — and this is free CI minutes, not a paid add-on.
+name: Supabase keepalive
+on:
+  schedule: [{ cron: '17 9 * * *' }]
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Touch the database
+        run: |
+          curl -fsS "${{ secrets.SUPABASE_URL }}/rest/v1/app_settings?select=id&limit=1" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" > /dev/null
+          echo "pinged $(date -u)"
