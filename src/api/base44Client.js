@@ -190,6 +190,39 @@ const auth = {
     };
   },
 
+  /**
+   * The profile directory, for the admin Users screen.
+   *
+   * Not exposed through `entities` because `profiles` lives in the `public`
+   * schema (auth needs it there) while entities may be namespaced elsewhere,
+   * and because toTable('Profile') would look for a table called `profile`.
+   * RLS returns only your own row unless you are an admin, so listing is safe
+   * to call from anywhere.
+   */
+  async listProfiles(sort = 'email') {
+    const { data, error } = await publicDb.from('profiles').select('*').order(sort, { ascending: true });
+    raise(error, 'profiles.list');
+    return data ?? [];
+  },
+
+  /**
+   * Column-level rules are enforced in the database, not here: the
+   * guard_profile_privileges trigger rejects a non-admin touching role or
+   * is_active, and guard_last_admin refuses to strip the final admin.
+   */
+  async updateProfile(id, patch) {
+    const { data, error } = await publicDb
+      .from('profiles')
+      .update(nullifyBlanks(patch))
+      .eq('id', id)
+      .select('id');
+    raise(error, 'profiles.update');
+    if (!data || data.length === 0) {
+      throw new Base44CompatError('That user no longer exists, or you do not have permission to change them.', 404);
+    }
+    return data[0];
+  },
+
   async logout(redirectTo) {
     await supabase.auth.signOut();
     window.location.href = redirectTo || '/login';
@@ -221,7 +254,15 @@ const invokeFunction = async (name, body) => {
       error.context?.status ?? 500
     );
   }
-  if (data?.error) throw new Base44CompatError(`Function ${name}: ${data.error}`, 400);
+  // A partial multi-batch send answers 207 with { error, emails_sent,
+  // failed_batch, resume_from_batch } — deliberately, so the caller can say
+  // which invoices already went out and not send them twice. Throwing on any
+  // response carrying `.error` destroyed all of that: the "do not resend"
+  // branch in EmailAplDialog was unreachable, the delivered batches were never
+  // archived, and a retry re-sent invoices customers already had.
+  if (data?.error && data?.emails_sent === undefined) {
+    throw new Base44CompatError(`Function ${name}: ${data.error}`, 400);
+  }
   return data;
 };
 
@@ -268,6 +309,37 @@ const Core = {
     raise(signError, 'UploadFile.sign');
 
     return { file_url: data.signedUrl, storage_path: path, filename: file.name, size_bytes: file.size };
+  },
+
+  /**
+   * Turn whatever is stored in the database into a URL that works right now.
+   *
+   * UploadFile hands back a signed URL that expires in 7 days, and callers
+   * persisted it. SignFile existed to re-sign and had ZERO call sites, so on
+   * day 8 every "Open" link in the invoice archive and the company logo on
+   * every generated document started returning an error — indistinguishable
+   * from the file having been deleted.
+   *
+   * The object path is recoverable from the stored URL, so this also repairs
+   * rows written before the fix. Anything that is not one of our signed URLs
+   * (an external image, a data: URL) is returned untouched.
+   */
+  async ResolveFileUrl(stored, seconds = 60 * 60) {
+    const value = String(stored || '');
+    if (!value) return '';
+    if (value.startsWith('data:') || value.startsWith('blob:')) return value;
+
+    let path = value;
+    if (/^https?:\/\//i.test(value)) {
+      const m = value.match(/\/storage\/v1\/object\/(?:sign|public)\/([^/]+)\/([^?]+)/);
+      if (!m) return value;                    // someone else's URL
+      if (m[1] !== STORAGE_BUCKET) return value;
+      path = decodeURIComponent(m[2]);
+    }
+
+    const { data, error } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(path, seconds);
+    if (error) return value;                   // fall back rather than break the page
+    return data.signedUrl;
   },
 
   /** Re-sign a stored object. Use instead of persisting decade-long URLs. */

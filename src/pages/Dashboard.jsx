@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, Package, Tag, Container, Clipboard, Users, ChevronRight, AlertCircle, Settings, FolderOpen } from "lucide-react";
+import { FileText, Package, Tag, Container, Clipboard, Users, ChevronRight, AlertCircle, Settings, FolderOpen, ShieldCheck } from "lucide-react";
+import { useAuth } from "@/lib/AuthContext";
 import { base44 } from "@/api/base44Client";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
@@ -19,7 +20,13 @@ const docCards = [
 
 
 export default function Dashboard() {
-  const { data: pos = [] } = useQuery({ queryKey: ["pos"], queryFn: () => base44.entities.PurchaseOrder.list("-created_date", 50) });
+  const { user: currentUser } = useAuth();
+  // Distinct key: this fetches 50 rows while six other pages fetch all of them
+  // under the same ["pos"] key. Visiting the Dashboard first primed the shared
+  // cache with 50, so Purchase Orders then showed 50 of 300 with no loading
+  // state and no indication anything was missing — earlier months simply
+  // vanished, which is indistinguishable from having been deleted.
+  const { data: pos = [] } = useQuery({ queryKey: ["pos", "recent50"], queryFn: () => base44.entities.PurchaseOrder.list("-created_date", 50) });
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: () => base44.entities.Product.list() });
   const { data: vendors = [] } = useQuery({ queryKey: ["vendors"], queryFn: () => base44.entities.Vendor.list() });
 
@@ -47,6 +54,13 @@ export default function Dashboard() {
           <Link to="/Vendors" className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 border rounded-lg px-3 py-2">
             <Users className="w-4 h-4" /> Vendors & Products
           </Link>
+          {/* Admin-only: activating a new colleague used to require the
+              Supabase dashboard. */}
+          {currentUser?.role === "admin" && (
+            <Link to="/Users" className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 border rounded-lg px-3 py-2">
+              <ShieldCheck className="w-4 h-4" /> Users
+            </Link>
+          )}
           <Link to="/Settings" className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 border rounded-lg px-3 py-2">
             <Settings className="w-4 h-4" /> Settings
           </Link>

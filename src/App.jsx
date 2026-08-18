@@ -25,6 +25,7 @@ const PalletLabels = lazy(() => import('./pages/PalletLabels'));
 const SCLP = lazy(() => import('./pages/SCLP.jsx'));
 const FoodChecklist = lazy(() => import('./pages/FoodChecklist'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Users = lazy(() => import('./pages/Users'));
 const Login = lazy(() => import('./pages/Login'));
 
 const RouteFallback = () => (
@@ -100,6 +101,7 @@ const AuthenticatedApp = () => {
       <Route path="/SCLP" element={<SCLP />} />
       <Route path="/FoodChecklist" element={<FoodChecklist />} />
       <Route path="/Settings" element={<Settings />} />
+      <Route path="/Users" element={<Users />} />
       <Route path="/TjxCanada" element={<TjxCanada />} />
       <Route path="/CustomerDocs" element={<CustomerDocs />} />
       <Route path="/CommercialInvoice" element={<CommercialInvoice />} />

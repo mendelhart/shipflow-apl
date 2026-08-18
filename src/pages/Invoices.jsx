@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { base44 } from "@/api/base44Client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Printer, Mail, Send, Loader2, FileText, CheckCircle, Download, X, AlertCircle } from "lucide-react";
+import { ArrowLeft, Printer, Mail, Send, Loader2, FileText, CheckCircle, Download, X, AlertCircle, AlertTriangle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -225,6 +225,7 @@ export default function Invoices() {
   const [editSubject, setEditSubject] = useState("");
   const [editBody, setEditBody] = useState("");
   const [mailgunStatus, setMailgunStatus] = useState(null); // null | "sending" | "sent" | "error: ..."
+  const [statusWarning, setStatusWarning] = useState("");
   const [isOpeningOutlook, setIsOpeningOutlook] = useState(false);
   const [emailBatchQueue, setEmailBatchQueue] = useState(null);
   const [processedBatchIds, setProcessedBatchIds] = useState(new Set());
@@ -274,14 +275,27 @@ export default function Invoices() {
       // Invoice sent to TJX Europe — bump status forward to "invoiced"
       // (never downgrades a PO already further along). Soft-fails: a
       // problem here shouldn't undo the fact the email already sent.
-      try {
-        await Promise.all(selectedPOs.map(po =>
-          base44.entities.PurchaseOrder.update(po.id, { status: bumpStatus(po.status, "invoiced") })
-        ));
-        qc.invalidateQueries({ queryKey: ["pos"] });
-      } catch (statusErr) {
-        console.error("Failed to update PO status to invoiced:", statusErr);
-      }
+      // Soft-fails, because a problem here must not undo the fact the email
+      // already went — but it is no longer silent. Swallowing this to
+      // console.error meant the emails went out, the statuses stayed put, the
+      // screen went green, and a week later someone re-sent the same invoices
+      // to TJX because nothing showed them as invoiced.
+      const statusFailures = [];
+      await Promise.all(selectedPOs.map(async (po) => {
+        try {
+          await base44.entities.PurchaseOrder.update(po.id, { status: bumpStatus(po.status, "invoiced") });
+        } catch (statusErr) {
+          console.error("Failed to update PO status to invoiced:", statusErr);
+          statusFailures.push(formatPoNumber(po));
+        }
+      }));
+      qc.invalidateQueries({ queryKey: ["pos"] });
+      setStatusWarning(
+        statusFailures.length
+          ? `The email sent, but ${statusFailures.join(", ")} could not be marked as invoiced. ` +
+            `Set the status by hand, or these will look unsent and may be sent again.`
+          : ""
+      );
 
       setMailgunStatus("sent");
     } catch (err) {
@@ -338,12 +352,22 @@ export default function Invoices() {
       setEmailResult({ to: emailBatchQueue[0]?.to, batches: emailBatchQueue.length });
       // Every batch downloaded/opened — treat the invoice as sent to TJX
       // Europe and bump status forward to "invoiced".
-      Promise.all(selectedPOs.map(po =>
+      Promise.allSettled(selectedPOs.map(po =>
         base44.entities.PurchaseOrder.update(po.id, { status: bumpStatus(po.status, "invoiced") })
-      )).then(() => {
+      )).then((results) => {
         qc.invalidateQueries({ queryKey: ["pos"] });
-      }).catch((err) => {
-        console.error("Failed to update PO status to invoiced:", err);
+        const failed = results
+          .map((r, i) => (r.status === "rejected" ? formatPoNumber(selectedPOs[i]) : null))
+          .filter(Boolean);
+        // Promise.all short-circuits: one rejection hid whether the others
+        // succeeded, and the whole thing was logged to a console nobody reads.
+        if (failed.length) {
+          console.error("Failed to update PO status to invoiced:", failed);
+          setStatusWarning(
+            `The documents were prepared, but ${failed.join(", ")} could not be marked as invoiced. ` +
+            `Set the status by hand so they are not sent twice.`
+          );
+        }
       });
     }
     setEmailBatchQueue(null);
@@ -370,6 +394,14 @@ export default function Invoices() {
       </div>
 
       {/* Result banner */}
+      {statusWarning && (
+        <div role="alert" className="mx-6 mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-center gap-3 no-print">
+          <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0" />
+          <p className="text-sm text-amber-900">{statusWarning}</p>
+          <button onClick={() => setStatusWarning("")} className="ml-auto text-amber-400 hover:text-amber-600"><X className="h-4 w-4" /></button>
+        </div>
+      )}
+
       {emailResult && (
         <div className="mx-6 mt-4 bg-green-50 border border-green-200 rounded-lg px-4 py-3 flex items-center gap-3 no-print">
           <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0" />

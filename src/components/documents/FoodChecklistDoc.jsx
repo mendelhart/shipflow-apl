@@ -1,3 +1,4 @@
+import { HEADER_IMG, FOOTER_IMG, HEADER_FALLBACK, FOOTER_FALLBACK } from "@/domain/brandAssets";
 import { format } from "date-fns";
 import { formatPoNumber } from "@/utils/poNumber";
 
@@ -203,7 +204,8 @@ export function RepeatVendorApprovalDoc({ po, vendor }) {
 
       {/* HEADER */}
       <div style={{ marginBottom: "24px" }}>
-        <img src="https://media.base44.com/images/public/69b77fe17f63d9da1603f490/4586c1ce5_HeaderTJX.png" alt="TJX Europe" style={{ width: "100%", height: "auto", display: "block" }} />
+        <img src={HEADER_IMG}
+          onError={(e) => { if (e.currentTarget.src !== HEADER_FALLBACK) e.currentTarget.src = HEADER_FALLBACK; }} alt="TJX Europe" style={{ width: "100%", height: "auto", display: "block" }} />
       </div>
 
       <div style={{ textAlign: "center", fontWeight: "bold", fontSize: "12px", textDecoration: "underline", marginBottom: "20px" }}>
@@ -250,7 +252,8 @@ export function RepeatVendorApprovalDoc({ po, vendor }) {
       <p style={{ marginBottom: "32px" }}>TJX Europe Logistics Team</p>
 
       <div style={{ marginTop: "20px" }}>
-        <img src="https://media.base44.com/images/public/69b77fe17f63d9da1603f490/16f51c542_FooterTJX1.png" alt="TJX Footer" style={{ width: "100%", height: "auto" }} />
+        <img src={FOOTER_IMG}
+          onError={(e) => { if (e.currentTarget.src !== FOOTER_FALLBACK) e.currentTarget.src = FOOTER_FALLBACK; }} alt="TJX Footer" style={{ width: "100%", height: "auto" }} />
       </div>
     </div>
   );

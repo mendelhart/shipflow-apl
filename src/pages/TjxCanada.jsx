@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label';
 import { PDFDocument } from 'pdf-lib';
 import JSZip from 'jszip';
 import { friendlyErrorMessage } from "@/lib/errors";
+import { encodeHeader, encodeAddressHeader, encodeTextBody } from "@/lib/mimeHeaders";
 
 // ============================================================================
 // Inlined former backend logic — runs client-side because backend functions
@@ -200,6 +201,45 @@ async function splitCombinedPdf(fileUrl, onStatus, filename) {
   const rawInvoices = llmResult?.invoices || [];
   if (rawInvoices.length === 0) {
     throw new Error('Could not identify invoices in this PDF.');
+  }
+
+  // The model's page ranges were trusted as-is. An inverted range produced a
+  // valid, 582-byte, ZERO-PAGE PDF with no error, which was then attached and
+  // emailed to the customer as their invoice; an overlapping range put one PO's
+  // page inside another PO's invoice. Neither is something a person can catch
+  // without opening every attachment, so validate before building anything.
+  const rangeProblems = [];
+  const seenPages = new Map();
+  rawInvoices.forEach((inv, idx) => {
+    const label = cleanPO(inv.po_number) || `entry ${idx + 1}`;
+    const rawStart = Math.round(inv.page_start);
+    const rawEnd = Math.round(inv.page_end);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) {
+      rangeProblems.push(`${label}: no page range`);
+      return;
+    }
+    if (rawEnd < rawStart) {
+      rangeProblems.push(`${label}: pages ${rawStart}-${rawEnd} run backwards`);
+      return;
+    }
+    if (rawStart < 1 || rawEnd > pageCount) {
+      rangeProblems.push(`${label}: pages ${rawStart}-${rawEnd} fall outside this ${pageCount}-page PDF`);
+      return;
+    }
+    for (let pg = rawStart; pg <= rawEnd; pg += 1) {
+      if (seenPages.has(pg)) rangeProblems.push(`page ${pg} claimed by both ${seenPages.get(pg)} and ${label}`);
+      else seenPages.set(pg, label);
+    }
+  });
+  const uncovered = [];
+  for (let pg = 1; pg <= pageCount; pg += 1) if (!seenPages.has(pg)) uncovered.push(pg);
+  if (uncovered.length) rangeProblems.push(`page(s) ${uncovered.join(', ')} not assigned to any invoice`);
+
+  if (rangeProblems.length) {
+    throw new Error(
+      `The AI split of this PDF is not usable, so nothing was generated: ${rangeProblems.join('; ')}. ` +
+      `Split this file manually and upload the invoices separately.`
+    );
   }
 
   const splitResults = await Promise.all(
@@ -423,12 +463,12 @@ function wrapBase64(base64) {
 
 function buildEmlBlob({ from, to, subject, body, files }) {
   const boundary = `----invoice-${Date.now().toString(36)}`;
-  const crlfBody = body.replace(/\n/g, '\r\n');
+  const { encoding: bodyEncoding, body: crlfBody } = encodeTextBody(body);
 
   let eml = '';
-  eml += `From: ${from}\r\n`;
-  eml += `To: ${to}\r\n`;
-  eml += `Subject: ${subject}\r\n`;
+  eml += `From: ${encodeAddressHeader(from)}\r\n`;
+  eml += `To: ${encodeAddressHeader(to)}\r\n`;
+  eml += `Subject: ${encodeHeader(subject)}\r\n`;
   // Tells (Windows desktop) Outlook to open this .eml as an editable,
   // unsent draft with a visible Send button — without this, double-clicking
   // a .eml normally opens it read-only, styled like a message you received,
@@ -439,7 +479,7 @@ function buildEmlBlob({ from, to, subject, body, files }) {
   eml += `\r\n`;
   eml += `--${boundary}\r\n`;
   eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: 7bit\r\n`;
+  eml += `Content-Transfer-Encoding: ${bodyEncoding}\r\n`;
   eml += `\r\n`;
   eml += `${crlfBody}\r\n`;
   eml += `\r\n`;
@@ -613,8 +653,20 @@ export default function TjxCanada() {
 
       const newVirtualFiles = [];
       const newStates = {};
+      const skipped = [];
       for (const inv of invoices) {
         const virtualName = `split::${inv.po_number}::${file.name}`;
+
+        // Dropping the same combined PDF twice — the obvious response to output
+        // that looks wrong — used to append a second copy of every invoice, with
+        // no duplicate check, unlike the two adjacent code paths which both have
+        // one. On the email path TJX then received every invoice twice; on the
+        // zip path two identical filenames collapse to one, so if the pair came
+        // from different sources a real invoice was silently dropped.
+        if (fileStates[virtualName] || files.some(f => f.name === virtualName)) {
+          skipped.push(inv.po_number);
+          continue;
+        }
 
         const byteChars = atob(inv.base64_pdf);
         const byteArr = new Uint8Array(byteChars.length);
@@ -637,7 +689,11 @@ export default function TjxCanada() {
       setFiles(prev => [...prev, ...newVirtualFiles]);
       setFileStates(prev => ({ ...prev, ...newStates }));
 
-      setSplitResult({ count: invoices.length, pos: invoices.map(i => i.po_number).join(', ') });
+      setSplitResult({
+        count: newVirtualFiles.length,
+        pos: newVirtualFiles.map(f => fileStates[f.name]?.poNumber ?? newStates[f.name]?.poNumber).filter(Boolean).join(', '),
+        skipped,
+      });
     } catch (err) {
       alert('Error: ' + friendlyErrorMessage(err, 'Unknown error'));
     } finally {
@@ -784,7 +840,12 @@ export default function TjxCanada() {
           files: batch.files.map((f, i) => ({ filename: f.filename, poNumber: batch.poNumbers[i], bytes: f.bytes })),
           to: batch.to,
           subject: batch.subject,
-          sendMethod: 'outlook',
+          // 'downloaded', not 'outlook'. This path writes a .eml to disk for the
+          // user to open in their mail client. Recording it as sent, with a
+          // timestamp, made the archive assert a delivery that may never have
+          // happened — and the archive is what gets consulted when someone asks
+          // whether an invoice went out.
+          sendMethod: 'downloaded',
         })
       );
       Promise.all(archiveJobs).then(() => {
@@ -851,7 +912,13 @@ export default function TjxCanada() {
           <div className="mt-4 bg-purple-50 border border-purple-200 rounded-lg px-4 py-3 flex items-center gap-3">
             <Scissors className="h-5 w-5 text-purple-500 flex-shrink-0" />
             <p className="text-sm text-purple-700">
-              Split into <strong>{splitResult.count}</strong> invoice{splitResult.count !== 1 ? 's' : ''}: {splitResult.pos}
+              Split into <strong>{splitResult.count}</strong> invoice{splitResult.count !== 1 ? 's' : ''}
+              {splitResult.pos ? `: ${splitResult.pos}` : ''}
+              {splitResult.skipped?.length > 0 && (
+                <span className="block text-purple-500 mt-0.5">
+                  Already loaded, not added again: {splitResult.skipped.join(', ')}
+                </span>
+              )}
             </p>
             <button onClick={() => setSplitResult(null)} className="ml-auto text-purple-400 hover:text-purple-600"><X className="h-4 w-4" /></button>
           </div>
@@ -1122,16 +1189,31 @@ export default function TjxCanada() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-gray-800">PO# {r.po_number || '—'}</span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${r.send_method === 'mailgun' ? 'bg-teal-100 text-teal-700' : 'bg-blue-100 text-blue-700'}`}>
-                      {r.send_method === 'mailgun' ? 'Mailgun' : 'Outlook'}
+                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${r.send_method === 'mailgun' ? 'bg-teal-100 text-teal-700' : 'bg-amber-100 text-amber-800'}`}
+                          title={r.send_method === 'mailgun' ? 'Delivered by Mailgun' : 'A .eml file was downloaded — delivery not confirmed'}>
+                      {r.send_method === 'mailgun' ? 'Sent' : 'Downloaded'}
                     </span>
                   </div>
                   <p className="text-xs text-gray-500 truncate">{r.filename} · to {r.sent_to} · {r.sent_at ? new Date(r.sent_at).toLocaleString() : ''}</p>
                 </div>
                 {r.pdf_url && (
-                  <a href={r.pdf_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex-shrink-0">
+                  /* Re-signed on click. The stored URL is a 7-day signed link;
+                     following it directly returned an error on day 8, which
+                     read as the file having been deleted. */
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const fresh = await base44.integrations.Core.ResolveFileUrl(r.pdf_url);
+                        window.open(fresh, '_blank', 'noopener,noreferrer');
+                      } catch (err) {
+                        alert(friendlyErrorMessage(err, 'Could not open that file.'));
+                      }
+                    }}
+                    className="text-xs text-blue-600 hover:underline flex-shrink-0"
+                  >
                     Open ↗
-                  </a>
+                  </button>
                 )}
               </div>
             ))}

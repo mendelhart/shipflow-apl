@@ -13,6 +13,8 @@ import JSZip from "jszip";
 import { format } from "date-fns";
 import { formatPoNumber } from "@/utils/poNumber";
 import { STATUS_ORDER, bumpStatus } from "@/domain/poStatus";
+import { HEADER_IMG, FOOTER_IMG, HEADER_FALLBACK, FOOTER_FALLBACK, loadBrandImage } from "@/domain/brandAssets";
+import { encodeHeader, encodeAddressHeader, encodeTextBody } from "@/lib/mimeHeaders";
 
 const PAGE = { w: 612, h: 792, margin: 36 }; // US Letter, points
 const CONTENT_W = PAGE.w - PAGE.margin * 2;
@@ -30,8 +32,8 @@ const INVOICE_ADDRESSES = {
 
 const FDC_DEST = { "50": "United Kingdom", "55": "Germany" };
 
-const HEADER_IMG_URL = "https://media.base44.com/images/public/69b77fe17f63d9da1603f490/4586c1ce5_HeaderTJX.png";
-const FOOTER_IMG_URL = "https://media.base44.com/images/public/69b77fe17f63d9da1603f490/16f51c542_FooterTJX1.png";
+// Served from our own /public now — see @/domain/brandAssets. These used to be
+// hot-linked from the platform this app was migrated off.
 
 const TABLE_BASE_STYLES = {
   styles: { fontSize: 8, cellPadding: 3, lineColor: [0, 0, 0], lineWidth: 0.5, textColor: [0, 0, 0], valign: "middle" },
@@ -146,7 +148,17 @@ function vendorAddressLines(vendor) {
 // UK Origin Declaration: reflects the actual set of countries of origin
 // present on this specific invoice's items.
 function getOriginDeclarationText(items) {
-  const origins = [...new Set((items || []).map(i => (i.country_of_origin || "USA").trim()).filter(Boolean))];
+  // A blank country of origin used to become "USA" silently — inside a signed
+  // preferential-origin declaration, for a Blainville, Quebec exporter. A false
+  // origin claim on a customs document is not a default worth having.
+  const missing = (items || []).filter(i => !String(i.country_of_origin || "").trim());
+  if (missing.length) {
+    throw new Error(
+      `Country of origin is blank on ${missing.map(i => i.item_number || "an item").join(", ")}. ` +
+      `Fill it in before generating documents — the origin declaration is signed.`
+    );
+  }
+  const origins = [...new Set((items || []).map(i => i.country_of_origin.trim()).filter(Boolean))];
   if (origins.length === 0) return "USA";
   if (origins.length === 1) return origins[0];
   return origins.slice(0, -1).join(", ") + " and " + origins[origins.length - 1];
@@ -159,7 +171,10 @@ export async function buildCommercialInvoicePdf({ po, vendor, customsId, setting
   const addr = INVOICE_ADDRESSES[po.po_prefix] || INVOICE_ADDRESSES["50"];
   const items = po.items || [];
   const cur = po.currency || "CAD";
-  const hsCode = "2106.90.99.98";
+  // Was applied to every row regardless of the item's own classification, so
+  // this invoice and the Food Data Checklist beside it declared different
+  // tariff codes for the same goods.
+  const HS_FALLBACK = "2106.90.99.98";
 
   const hasSignatureFont = await registerSignatureFont(pdf);
   const exporterName = po.exporter_name || settingsExporterName || "Mendel Hart";
@@ -213,7 +228,7 @@ export async function buildCommercialInvoicePdf({ po, vendor, customsId, setting
       item.item_number || "",
       item.vendor_style || "",
       item.description || "",
-      hsCode,
+      item.hs_code || HS_FALLBACK,
       item.country_of_origin || "USA",
       item.size || "",
       String(item.units_per_carton ?? ""),
@@ -540,7 +555,7 @@ export async function buildRepeatFdcPdf({ po, vendor }) {
   let y = PAGE.margin;
 
   try {
-    const dataUrl = await fetchImageDataUrl(HEADER_IMG_URL);
+    const dataUrl = await loadBrandImage(HEADER_IMG, HEADER_FALLBACK);
     const props = pdf.getImageProperties(dataUrl);
     const imgH = (props.height / props.width) * CONTENT_W;
     pdf.addImage(dataUrl, PAGE.margin, y, CONTENT_W, imgH);
@@ -612,7 +627,7 @@ export async function buildRepeatFdcPdf({ po, vendor }) {
   y += 20;
 
   try {
-    const dataUrl = await fetchImageDataUrl(FOOTER_IMG_URL);
+    const dataUrl = await loadBrandImage(FOOTER_IMG, FOOTER_FALLBACK);
     const props = pdf.getImageProperties(dataUrl);
     const imgH = (props.height / props.width) * CONTENT_W;
     if (y + imgH > PAGE.h - PAGE.margin) pdf.addPage();
@@ -742,19 +757,19 @@ function wrapBase64(base64) {
 
 export function buildEmlBlob({ from, to, subject, body, files }) {
   const boundary = `----shipping-docs-${Date.now().toString(36)}`;
-  const crlfBody = body.replace(/\n/g, "\r\n");
+  const { encoding: bodyEncoding, body: crlfBody } = encodeTextBody(body);
 
   let eml = "";
-  eml += `From: ${from}\r\n`;
-  eml += `To: ${to}\r\n`;
-  eml += `Subject: ${subject}\r\n`;
+  eml += `From: ${encodeAddressHeader(from)}\r\n`;
+  eml += `To: ${encodeAddressHeader(to)}\r\n`;
+  eml += `Subject: ${encodeHeader(subject)}\r\n`;
   eml += `X-Unsent: 1\r\n`;
   eml += `MIME-Version: 1.0\r\n`;
   eml += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n`;
   eml += `\r\n`;
   eml += `--${boundary}\r\n`;
   eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: 7bit\r\n`;
+  eml += `Content-Transfer-Encoding: ${bodyEncoding}\r\n`;
   eml += `\r\n`;
   eml += `${crlfBody}\r\n`;
   eml += `\r\n`;

@@ -30,6 +30,7 @@ import InboundVerificationDoc from "@/components/documents/InboundVerificationDo
 import { parseWarehouseReport } from "@/utils/warehouseReportParser";
 import { friendlyErrorMessage } from "@/lib/errors";
 import { formatDate } from "@/lib/dates";
+import { addPaginatedImage } from "@/lib/paginatedImage";
 
 const SELLER = "Dominion Liquid Technologies\n3965 Virginia Ave\nCincinnati, OH 45227\nUSA";
 const BUYER = "Capital Nutrition Inc.\n1020 Boul. Michèle-Bohec\nBlainville, QC J7C 5E2\nCanada";
@@ -504,17 +505,7 @@ Return ALL line items, even unmatched ones (use null for product_id).`,
     // pattern is to draw the SAME full-height image every time, but shift
     // its y-position up by one page's worth of height on each iteration —
     // that "scrolls" a different vertical band into the visible page area.
-    let heightLeft = imgH;
-    let position = margin; // y-offset of the image; moves negative each page
-    let firstPage = true;
-
-    while (heightLeft > 0) {
-      if (!firstPage) pdf.addPage();
-      pdf.addImage(imgData, "JPEG", margin, position, contentW, imgH, undefined, "FAST");
-      heightLeft -= pageContentH;
-      position -= pageContentH;
-      firstPage = false;
-    }
+    addPaginatedImage(pdf, imgData, { margin });
 
     const filename =
       docType === "invoice"
