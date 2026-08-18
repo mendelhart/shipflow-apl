@@ -11,6 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useNavigate } from "react-router-dom";
+import { friendlyErrorMessage } from "@/lib/errors";
+import { bumpStatus } from "@/domain/poStatus";
 
 const EMPTY_PO = { po_number: "", po_prefix: "50", dept_number: "81", vendor_id: "", invoice_number: "", invoice_date: "", freight_terms: "EXW", currency: "CAD", ship_date: "", cancel_date: "", status: "draft", notes: "", items: [], container_number: "", seal_number: "", total_cartons: 0, total_pallets: 0, total_gross_weight_kg: 0, total_net_weight_kg: 0, total_cbm: 0, load_type: "FCL", pre_ticketed: false, store_ready: false, apl_booking_number: "", exporter_name: "Mendel Hart", exporter_title: "" };
 
@@ -19,26 +21,7 @@ const EMPTY_ITEM = { product_id: "", item_number: "", vendor_style: "", descript
 const AUTO_SPECS = { gross_weight_kg: 5.0, net_weight_kg: 5.1, cbm: 0.015 };
 
 // Same 402/403 classification used across the other pages/components.
-function friendlyErrorMessage(err, fallback) {
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  if (err?.response?.status === 402 || msg.includes("credit") || msg.includes("payment required")) {
-    return "Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.";
-  }
-  if (err?.response?.status === 403 || msg.includes("backend functions") || msg.includes("lacks") || msg.includes("capability")) {
-    return "This action needs backend functions, which aren't available on the current Base44 plan.";
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
 
-// Status auto-progresses forward only (draft < ready < booked < shipped <
-// invoiced) — never downgrades a PO that's already further along.
-const STATUS_ORDER = ["draft", "ready", "booked", "shipped", "invoiced"];
-function bumpStatus(current, target) {
-  const cur = STATUS_ORDER.indexOf(current || "draft");
-  const tgt = STATUS_ORDER.indexOf(target);
-  if (tgt === -1) return current || "draft";
-  return tgt > cur ? target : (current || "draft");
-}
 
 export default function POForm({ po, onClose }) {
   const qc = useQueryClient();

@@ -37,19 +37,29 @@ const ALLOWED_ORIGINS = (Deno.env.get('ALLOWED_ORIGINS') ?? '')
   .map((o) => o.trim())
   .filter(Boolean);
 
+if (ALLOWED_ORIGINS.length === 0) {
+  // Emitting an empty Access-Control-Allow-Origin blocks every browser
+  // caller including the app itself, and surfaces as an inscrutable CORS
+  // error rather than a configuration problem. Say so loudly at boot.
+  console.error(
+    '[cors] ALLOWED_ORIGINS is not set — browser requests will be rejected. ' +
+      'Set it to your site origin, e.g. https://shipflow-apl.pages.dev',
+  );
+}
+
 export function cors(req: Request): Record<string, string> {
   const origin = req.headers.get('origin') ?? '';
-  // Default-deny: with ALLOWED_ORIGINS unset we echo nothing, so a stray site
-  // can't call these functions with a user's credentials.
-  const allow = ALLOWED_ORIGINS.length === 0
-    ? ''
-    : ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-  return {
-    'Access-Control-Allow-Origin': allow,
+  const headers: Record<string, string> = {
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     Vary: 'Origin',
   };
+  // Only echo an origin we actually trust; otherwise omit the header
+  // entirely rather than sending a value the browser will reject anyway.
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
 }
 
 export const json = (req: Request, body: unknown, status = 200) =>
@@ -67,6 +77,81 @@ export class HttpError extends Error {
   constructor(message: string, readonly status = 400) {
     super(message);
   }
+}
+
+
+/* ----------------------------------------------------- outbound fetch */
+
+/**
+ * Server-side fetch of a client-supplied URL is an SSRF primitive: the
+ * function runs inside the platform's network, so a caller can aim it at
+ * cloud metadata endpoints or internal services and have the response
+ * relayed back (transcribed by the model, or mailed as an attachment).
+ *
+ * Only this project's own Supabase storage is fetchable.
+ */
+const STORAGE_HOST = (() => {
+  try { return new URL(SUPABASE_URL).host; } catch { return ''; }
+})();
+
+const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|::1$|\[?::1\]?$|172\.(1[6-9]|2\d|3[01])\.|0\.)/i;
+
+export function assertFetchableUrl(raw: string): URL {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new HttpError('Attachment URL is not a valid URL.', 400);
+  }
+  if (url.protocol !== 'https:') {
+    throw new HttpError('Attachment URLs must use https.', 400);
+  }
+  if (PRIVATE_HOST.test(url.hostname)) {
+    throw new HttpError('Attachment URL host is not permitted.', 400);
+  }
+  if (url.host !== STORAGE_HOST) {
+    throw new HttpError(
+      'Attachment URLs must point at this project\'s Supabase storage.',
+      400,
+    );
+  }
+  return url;
+}
+
+const MAX_FETCH_BYTES = 25 * 1024 * 1024; // 25 MB
+const FETCH_TIMEOUT_MS = 20_000;
+
+/** Fetch with a timeout, a size cap, and no redirect-following. */
+export async function fetchBounded(raw: string): Promise<{ bytes: Uint8Array; contentType: string }> {
+  const url = assertFetchableUrl(raw);
+  const res = await fetch(url, {
+    redirect: 'error',
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new HttpError(`Could not read attachment (${res.status}).`, 400);
+
+  const declared = Number(res.headers.get('content-length') ?? 0);
+  if (declared > MAX_FETCH_BYTES) {
+    throw new HttpError('Attachment is too large.', 413);
+  }
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > MAX_FETCH_BYTES) {
+    throw new HttpError('Attachment is too large.', 413);
+  }
+  return {
+    bytes: new Uint8Array(buf),
+    contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+  };
+}
+
+/** Escape text that will be interpolated into an HTML email body. */
+export function escapeHtml(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /* -------------------------------------------------------- entity helpers */
@@ -115,8 +200,11 @@ function entities(db: SupabaseClient) {
           return data;
         },
         async delete(id: string) {
-          const { error } = await db.from(table).delete().eq('id', id);
+          const { data, error } = await db.from(table).delete().eq('id', id).select('id');
           if (error) throw new HttpError(`${entity}.delete: ${error.message}`, 500);
+          if (!data || data.length === 0) {
+            throw new HttpError(`${entity} ${id} was not deleted.`, 404);
+          }
           return { success: true };
         },
       };
@@ -139,21 +227,19 @@ async function InvokeLLM({ prompt, response_json_schema, file_urls }: LLMParams)
     throw new HttpError('GEMINI_API_KEY is not set on this function.', 503);
   }
 
+  const urls = file_urls ?? [];
+  if (urls.length > 10) {
+    throw new HttpError('Too many attachments in one request (max 10).', 400);
+  }
+
   const parts: unknown[] = [{ text: prompt }];
-  for (const url of file_urls ?? []) {
-    const res = await fetch(url);
-    if (!res.ok) throw new HttpError(`Could not read attachment: ${url}`, 400);
-    const bytes = new Uint8Array(await res.arrayBuffer());
+  for (const url of urls) {
+    const { bytes, contentType } = await fetchBounded(url);
     let binary = '';
     for (let i = 0; i < bytes.length; i += 8192) {
       binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
     }
-    parts.push({
-      inlineData: {
-        mimeType: res.headers.get('content-type') ?? 'application/pdf',
-        data: btoa(binary),
-      },
-    });
+    parts.push({ inlineData: { mimeType: contentType, data: btoa(binary) } });
   }
 
   const body: Record<string, unknown> = { contents: [{ parts }] };
@@ -180,7 +266,22 @@ async function InvokeLLM({ prompt, response_json_schema, file_urls }: LLMParams)
     );
     if (res.ok) {
       const data = await res.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      const candidate = data?.candidates?.[0];
+      const blocked = data?.promptFeedback?.blockReason;
+      if (blocked) {
+        throw new HttpError(`The model declined this document (${blocked}).`, 422);
+      }
+      // Long answers arrive split across several parts; reading only [0]
+      // truncates them and then fails JSON.parse for no visible reason.
+      const text = (candidate?.content?.parts ?? [])
+        .map((p: { text?: string }) => p?.text ?? '')
+        .join('');
+      if (candidate?.finishReason && candidate.finishReason !== 'STOP') {
+        throw new HttpError(
+          `The model stopped early (${candidate.finishReason}). Try a smaller document.`,
+          422,
+        );
+      }
       if (!response_json_schema) return text;
       try {
         return JSON.parse(text);
@@ -189,10 +290,14 @@ async function InvokeLLM({ prompt, response_json_schema, file_urls }: LLMParams)
       }
     }
     lastError = await res.text().catch(() => `HTTP ${res.status}`);
-    if (![429, 500, 503].includes(res.status)) break;
+    // 502/504 are transient backend errors and worth retrying too.
+    if (![429, 500, 502, 503, 504].includes(res.status)) break;
   }
-  // Never echo the key back to the client.
-  throw new HttpError(`LLM request failed: ${lastError.slice(0, 300)}`, 502);
+  // Log the provider's message server-side; return a generic one. The raw
+  // text carries quota metrics and project identifiers, and doubles as an
+  // oracle for probing.
+  console.error('[llm] provider failure:', lastError.slice(0, 500));
+  throw new HttpError('The AI provider is unavailable right now. Please retry.', 502);
 }
 
 /* --------------------------------------------------------------- client */
@@ -215,7 +320,13 @@ export async function createClientFromRequest(req: Request) {
         if (!user) throw new HttpError('Unauthorized', 401);
         const { data: profile } = await asService
           .from('profiles').select('*').eq('id', user.id).maybeSingle();
-        return { id: user.id, email: user.email, role: profile?.role ?? 'user', ...profile };
+        return {
+          ...profile,
+          id: user.id,
+          email: user.email,
+          role: profile?.role || 'user',
+          is_active: profile?.is_active ?? false,
+        };
       },
     },
     entities: entities(asUser),
@@ -236,8 +347,17 @@ export function serve(handler: (req: Request) => Promise<Response>) {
       return await handler(req);
     } catch (error) {
       const status = error instanceof HttpError ? error.status : 500;
-      if (status >= 500) console.error(error);
-      return json(req, { error: (error as Error).message }, status);
+      const ref = crypto.randomUUID().slice(0, 8);
+      // Log everything, including 4xx — auth and configuration failures were
+      // previously invisible server-side.
+      console.error(`[${ref}] ${status}`, (error as Error).stack ?? error);
+      return json(
+        req,
+        status >= 500
+          ? { error: 'Something went wrong on the server.', ref }
+          : { error: (error as Error).message, ref },
+        status,
+      );
     }
   });
 }

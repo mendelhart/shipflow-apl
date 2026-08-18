@@ -1,6 +1,8 @@
 import { createClientFromRequest, json, serve, HttpError } from '../_shared/base44-compat.ts';
 import { PDFDocument } from 'npm:pdf-lib@1.17.1';
 
+const MAX_INVOICES_PER_DOCUMENT = 50;
+
 function cleanPO(val) {
   const po = (val || '').trim().replace(/\s+/g, '').replace(/[^A-Za-z0-9\-]/g, '').toUpperCase();
   return po.length >= 3 ? po : null;
@@ -26,9 +28,8 @@ STRICT RULES for finding PO number:
 
 serve(async (req) => {
   try {
-    const base44 = createClientFromRequest(req);
-    const user = await base44.auth.me();
-    if (!user) return json(req, { error: 'Unauthorized' }, 401);
+    const base44 = await createClientFromRequest(req);
+    const user = await base44.auth.me(); // throws 401 if the JWT is missing/expired
 
     const { file_url, file_name } = await req.json();
     if (!file_url) return json(req, { error: 'No file_url provided' }, 400);
@@ -80,25 +81,60 @@ serve(async (req) => {
       return json(req, { error: 'Could not identify invoices in this PDF.' }, 400);
     }
 
+    // The model decides how many invoices are in the document. Cap it: a
+    // hallucinated 200-entry array would spawn 200 concurrent pdf-lib
+    // documents and a response several hundred MB after base64 inflation.
+    if (rawInvoices.length > MAX_INVOICES_PER_DOCUMENT) {
+      throw new HttpError(
+        `This document appears to contain ${rawInvoices.length} invoices, which is more than can be processed at once (max ${MAX_INVOICES_PER_DOCUMENT}). Split the file and try again.`,
+        422,
+      );
+    }
+
+    const skipped: string[] = [];
+
     // Split all invoices in parallel
     const splitResults = await Promise.all(rawInvoices.map(async (inv) => {
       const po = cleanPO(inv.po_number);
       if (!po) return null;
 
-      const start = Math.max(1, Math.round(inv.page_start)) - 1;
-      const end = Math.min(pageCount, Math.round(inv.page_end)) - 1;
+      // Page numbers come from the model and were previously trusted. An
+      // inverted or out-of-range range produced an EMPTY pdf that was then
+      // emailed to the customer as their invoice.
+      const rawStart = Number(inv.page_start);
+      const rawEnd = Number(inv.page_end);
+      if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) {
+        skipped.push(`${po} (no page range)`);
+        return null;
+      }
+      const start = Math.min(Math.max(1, Math.round(rawStart)), pageCount) - 1;
+      const end = Math.min(Math.max(1, Math.round(rawEnd)), pageCount) - 1;
+      if (end < start) {
+        skipped.push(`${po} (pages ${start + 1}-${end + 1} out of order)`);
+        return null;
+      }
 
       const splitDoc = await PDFDocument.create();
       const pageIndices = [];
       for (let i = start; i <= end; i++) pageIndices.push(i);
-      const copiedPages = await splitDoc.copyPages(srcDoc, pageIndices);
-      copiedPages.forEach(p => splitDoc.addPage(p));
+      if (pageIndices.length === 0) {
+        skipped.push(`${po} (empty page range)`);
+        return null;
+      }
 
-      const splitBytes = await splitDoc.save();
-      const base64Pdf = uint8ToBase64(splitBytes);
-
-      console.log(`Done: PO=${po}, pages ${start + 1}-${end + 1}, size=${splitBytes.length}`);
-      return { po_number: po, base64_pdf: base64Pdf, pages: pageIndices.length };
+      try {
+        const copiedPages = await splitDoc.copyPages(srcDoc, pageIndices);
+        copiedPages.forEach(p => splitDoc.addPage(p));
+        const splitBytes = await splitDoc.save();
+        const base64Pdf = uint8ToBase64(splitBytes);
+        console.log(`Done: PO=${po}, pages ${start + 1}-${end + 1}, size=${splitBytes.length}`);
+        return { po_number: po, base64_pdf: base64Pdf, pages: pageIndices.length };
+      } catch (splitError) {
+        // One bad range must not reject the whole batch and discard the
+        // invoices that split correctly.
+        skipped.push(`${po} (${(splitError as Error).message})`);
+        return null;
+      }
     }));
 
     const results = splitResults.filter(Boolean);
@@ -106,10 +142,17 @@ serve(async (req) => {
       return json(req, { error: 'Could not extract PO numbers from invoices in this PDF.' }, 400);
     }
 
-    return json(req, { invoices: results, total: results.length });
+    return json(req, {
+      invoices: results,
+      total: results.length,
+      // Surfaced so the caller can tell the user which invoices did NOT come
+      // out of the document, instead of silently sending fewer than expected.
+      skipped,
+    });
 
   } catch (error) {
-    console.error('Fatal error:', error.message);
-    return json(req, { error: error.message }, 500);
+    // serve() maps HttpError.status correctly; hardcoding 500 here made
+    // every auth or validation failure look like a server crash.
+    throw error;
   }
 });

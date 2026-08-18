@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { friendlyErrorMessage } from "@/lib/errors";
 
 const FIELDS = [
   { key: "country_of_origin", label: "Country of Origin", type: "text" },
@@ -23,6 +24,8 @@ export default function BulkEditDialog({ open, onClose, products, selectedIds, o
   const [enabled, setEnabled] = useState({});
   const [values, setValues] = useState({});
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [progress, setProgress] = useState(null);
 
   const targetIds = selectedIds && selectedIds.length > 0 ? selectedIds : products.map(p => p.id);
 
@@ -31,22 +34,79 @@ export default function BulkEditDialog({ open, onClose, products, selectedIds, o
 
   const handleApply = async () => {
     const updates = {};
+    let badNumber = null;
     Object.keys(enabled).forEach(k => {
       if (enabled[k] && values[k] !== undefined && values[k] !== "") {
-        updates[k] = FIELDS.find(f => f.key === k)?.type === "number" ? parseFloat(values[k]) : values[k];
+        if (FIELDS.find(f => f.key === k)?.type === "number") {
+          const n = parseFloat(values[k]);
+          // parseFloat("abc") is NaN, which serialises to null and would WIPE
+          // the field on every selected product instead of setting it.
+          if (!Number.isFinite(n)) { badNumber = k; return; }
+          updates[k] = n;
+        } else {
+          updates[k] = values[k];
+        }
       }
     });
+    if (badNumber) {
+      setError(`"${FIELDS.find(f => f.key === badNumber)?.label || badNumber}" is not a valid number.`);
+      return;
+    }
     if (Object.keys(updates).length === 0) return;
+
     setSaving(true);
-    await Promise.all(targetIds.map(id => base44.entities.Product.update(id, updates)));
+    setError("");
+    setProgress({ done: 0, total: targetIds.length });
+
+    // Previously: Promise.all over every id with no catch. One rejection threw
+    // out of the handler, so `saving` was never cleared, the dialog hung, and —
+    // worse — the user was never told WHICH products had been updated and which
+    // had not. That is the "not all products get saved" symptom: the writes
+    // genuinely were partial, and nothing said so.
+    //
+    // Now: bounded concurrency, every result collected, failures reported.
+    const CONCURRENCY = 5;
+    const failures = [];
+    let done = 0;
+    const queue = [...targetIds];
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        const id = queue.shift();
+        try {
+          await base44.entities.Product.update(id, updates);
+        } catch (err) {
+          const p = products.find(x => x.id === id);
+          failures.push({ id, label: p?.item_number || p?.description || id, err });
+        } finally {
+          done += 1;
+          setProgress({ done, total: targetIds.length });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targetIds.length) }, worker));
+
     setSaving(false);
+    setProgress(null);
     onSuccess();
+
+    if (failures.length > 0) {
+      setError(
+        `${targetIds.length - failures.length} of ${targetIds.length} products updated. ` +
+        `Failed: ${failures.slice(0, 5).map(f => f.label).join(", ")}` +
+        `${failures.length > 5 ? ` and ${failures.length - 5} more` : ""}. ` +
+        `${friendlyErrorMessage(failures[0].err, "")}`
+      );
+      return; // keep the dialog open so the failures are visible
+    }
     onClose();
   };
 
   const handleClose = () => {
+    if (saving) return; // don't discard an in-flight bulk update
     setEnabled({});
     setValues({});
+    setError("");
     onClose();
   };
 
@@ -80,14 +140,22 @@ export default function BulkEditDialog({ open, onClose, products, selectedIds, o
             </div>
           ))}
         </div>
+        {error && (
+          <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+
         <div className="flex justify-end gap-2 mt-4">
-          <Button variant="outline" onClick={handleClose}>Cancel</Button>
+          <Button variant="outline" onClick={handleClose} disabled={saving}>Cancel</Button>
           <Button
             onClick={handleApply}
             disabled={saving || Object.values(enabled).every(v => !v)}
             className="bg-blue-600 hover:bg-blue-700"
           >
-            {saving ? "Applying..." : `Apply to ${targetIds.length} product${targetIds.length !== 1 ? "s" : ""}`}
+            {saving
+              ? `Applying… ${progress ? `${progress.done}/${progress.total}` : ""}`
+              : `Apply to ${targetIds.length} product${targetIds.length !== 1 ? "s" : ""}`}
           </Button>
         </div>
       </DialogContent>

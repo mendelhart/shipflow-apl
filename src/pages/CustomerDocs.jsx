@@ -10,7 +10,8 @@ import { Textarea } from "@/components/ui/textarea";
 import CustomerInvoiceDoc from "@/components/documents/CustomerInvoiceDoc";
 import CustomerPackingListDoc from "@/components/documents/CustomerPackingListDoc";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { format } from "date-fns";
+import { friendlyErrorMessage } from "@/lib/errors";
+import { formatDate } from "@/lib/dates";
 
 const EMPTY_DATA = {
   customer: "",
@@ -26,16 +27,6 @@ const EMPTY_DATA = {
 // Same 402/403 classification used in TjxCanada.jsx / Invoices.jsx / CommercialInvoice.jsx —
 // gives a clear message instead of a silent failure when integration credits
 // run out or a backend function isn't available on the current plan.
-function friendlyErrorMessage(err, fallback) {
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  if (err?.response?.status === 402 || msg.includes("credit") || msg.includes("payment required")) {
-    return "Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.";
-  }
-  if (err?.response?.status === 403 || msg.includes("backend functions") || msg.includes("lacks") || msg.includes("capability")) {
-    return "This action needs backend functions, which aren't available on the current Base44 plan.";
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
 
 export default function CustomerDocs() {
   const navigate = useNavigate();
@@ -50,6 +41,9 @@ export default function CustomerDocs() {
   const [aiError, setAiError] = useState("");
   const [parseStatus, setParseStatus] = useState("");
   const [saving, setSaving] = useState(false);
+  // Which saved record the form is editing, if any.
+  const [currentInvoiceId, setCurrentInvoiceId] = useState(null);
+  const [catalogNotice, setCatalogNotice] = useState("");
   const [saveError, setSaveError] = useState("");
   const [savedFlash, setSavedFlash] = useState(false);
   const [openMonths, setOpenMonths] = useState({});
@@ -90,25 +84,49 @@ export default function CustomerDocs() {
       const upc = (item.upc || "").trim();
       return upc && !productByUpc[upc];
     });
-    for (const item of toCreate) {
-      await base44.entities.Product.create({
-        item_number: item.upc || "",
-        upc_code: item.upc || "",
-        description: item.description || "",
-        country_of_origin: item.country_of_origin || "",
-        carton_gross_weight_kg: item.gross_weight_kg || undefined,
-        carton_net_weight_kg: item.net_weight_kg || undefined,
-        hs_code: item.hs_code || undefined,
-      });
-    }
-    if (toCreate.length > 0) {
+    if (toCreate.length === 0) return { created: 0, failed: [] };
+
+    // One insert per new product, in a single batched call rather than a
+    // sequential round trip each. Previously a failure on any one item — a
+    // duplicate item_number now that the column is unique, say — threw out of
+    // this loop, so the products after it were never created AND the caller
+    // reported "Failed to extract data from this document", even though
+    // extraction had succeeded and the form was already populated.
+    const rows = toCreate.map(item => ({
+      item_number: item.upc || "",
+      upc_code: item.upc || "",
+      description: item.description || "",
+      country_of_origin: item.country_of_origin || "",
+      carton_gross_weight_kg: item.gross_weight_kg ?? null,
+      carton_net_weight_kg: item.net_weight_kg ?? null,
+      hs_code: item.hs_code ?? null,
+    }));
+
+    try {
+      await base44.entities.Product.bulkCreate(rows);
       queryClient.invalidateQueries({ queryKey: ["products"] });
+      return { created: rows.length, failed: [] };
+    } catch (bulkError) {
+      // Fall back to one-at-a-time so a single bad row cannot cost the rest.
+      const failed = [];
+      let created = 0;
+      for (const row of rows) {
+        try {
+          await base44.entities.Product.create(row);
+          created += 1;
+        } catch (err) {
+          console.error("Could not add product to catalog:", row.item_number, err);
+          failed.push(row.item_number || row.description);
+        }
+      }
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+      return { created, failed, bulkError };
     }
   }, [products, queryClient]);
 
   const grouped = {};
   savedInvoices.forEach(inv => {
-    const key = inv.created_date ? format(new Date(inv.created_date), "MMMM yyyy") : "Unknown";
+    const key = formatDate(inv.created_date, "MMMM yyyy", "Unknown");
     if (!grouped[key]) grouped[key] = [];
     grouped[key].push(inv);
   });
@@ -120,7 +138,15 @@ export default function CustomerDocs() {
     setSaving(true);
     setSaveError("");
     try {
-      await base44.entities.CustomerInvoice.create(data);
+      // Loading a saved invoice and pressing Save used to create a SECOND
+      // record every time, leaving the uncorrected original in the archive
+      // alongside it.
+      if (currentInvoiceId) {
+        await base44.entities.CustomerInvoice.update(currentInvoiceId, data);
+      } else {
+        const created = await base44.entities.CustomerInvoice.create(data);
+        if (created?.id) setCurrentInvoiceId(created.id);
+      }
       queryClient.invalidateQueries({ queryKey: ["customerInvoices"] });
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
@@ -132,8 +158,12 @@ export default function CustomerDocs() {
   };
 
   const deleteInvoice = async (id) => {
+    const inv = savedInvoices.find(i => i.id === id);
+    const label = inv?.invoiceNumber || inv?.po || "this invoice";
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
     try {
       await base44.entities.CustomerInvoice.delete(id);
+      if (currentInvoiceId === id) setCurrentInvoiceId(null);
       queryClient.invalidateQueries({ queryKey: ["customerInvoices"] });
     } catch (err) {
       setSaveError(friendlyErrorMessage(err, "Failed to delete invoice."));
@@ -142,6 +172,7 @@ export default function CustomerDocs() {
 
   const loadInvoice = (inv) => {
     const { id, created_date, updated_date, created_by, ...rest } = inv;
+    setCurrentInvoiceId(id);
     setData({
       customer: rest.customer || "",
       supplier: rest.supplier || "",
@@ -233,6 +264,9 @@ Extract EVERY line item. Do not skip any rows.`,
           }
         }
       });
+      // A fresh extraction is a new document, not an edit of whatever was
+      // previously loaded from the archive.
+      setCurrentInvoiceId(null);
       setData({
         customer: result.customer || "",
         supplier: result.supplier || "",
@@ -244,7 +278,24 @@ Extract EVERY line item. Do not skip any rows.`,
         items: enrichItemsWithCatalog(result.items || []),
       });
       setAiFile(null);
-      await saveNewProductsToCatalog(enrichItemsWithCatalog(result.items || []));
+
+      // Adding new products to the catalog is a side benefit of extraction, not
+      // part of it. It must never be able to report the extraction as failed —
+      // which is exactly what used to happen, sending the user off to re-upload
+      // (and re-pay for) a document that had parsed perfectly.
+      const catalogResult = await saveNewProductsToCatalog(
+        enrichItemsWithCatalog(result.items || [])
+      );
+      if (catalogResult?.failed?.length) {
+        setCatalogNotice(
+          `Extracted successfully. ${catalogResult.created} new product${catalogResult.created === 1 ? "" : "s"} added to the catalog; ` +
+          `${catalogResult.failed.length} could not be added (${catalogResult.failed.slice(0, 3).join(", ")}).`
+        );
+      } else if (catalogResult?.created) {
+        setCatalogNotice(
+          `${catalogResult.created} new product${catalogResult.created === 1 ? "" : "s"} added to the catalog.`
+        );
+      }
     } catch (err) {
       setAiError(friendlyErrorMessage(err, "Failed to extract data from this document. Please try again."));
     } finally {
@@ -306,20 +357,20 @@ Extract EVERY line item. Do not skip any rows.`,
         <div class="two-col">
           <div class="box">
             <div class="box-label">FROM:</div>
-            <div class="bold">${supplierLines[0] || ""}</div>
-            ${supplierLines.slice(1).map(l => `<div>${l}</div>`).join("")}
+            <div class="bold">${esc(supplierLines[0] || "")}</div>
+            ${supplierLines.slice(1).map(l => `<div>${esc(l)}</div>`).join("")}
           </div>
           <div class="box">
             <div class="box-label">SHIP TO:</div>
-            <div class="bold">${customerLines[0] || ""}</div>
-            ${customerLines.slice(1).map(l => `<div>${l}</div>`).join("")}
+            <div class="bold">${esc(customerLines[0] || "")}</div>
+            ${customerLines.slice(1).map(l => `<div>${esc(l)}</div>`).join("")}
           </div>
         </div>
         <div class="box">
           <div class="box-label">PO NUMBER</div>
-          <div style="font-size:20px;font-weight:bold;">${po}</div>
+          <div style="font-size:20px;font-weight:bold;">${esc(po)}</div>
         </div>
-        ${containsSummary ? `<div class="box"><div class="box-label">CONTAINS</div><div style="font-size:13px;font-weight:bold;">${containsSummary}</div></div>` : ""}
+        ${containsSummary ? `<div class="box"><div class="box-label">CONTAINS</div><div style="font-size:13px;font-weight:bold;">${esc(containsSummary)}</div></div>` : ""}
         <div class="box"><div class="box-label">TOTAL CARTONS</div>${totalCartons || "—"}</div>
         <div class="box"><div class="box-label">TOTAL PALLETS</div>${count}</div>
         <div class="box"><div class="box-label">GROSS WEIGHT (this pallet)</div>${weightPerPallet ? weightPerPallet.toFixed(1) + " kg" : "—"}</div>
@@ -331,7 +382,7 @@ Extract EVERY line item. Do not skip any rows.`,
     if (!win) { alert("Please allow popups to print pallet labels."); return; }
     win.document.write(`<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
-<title>Pallet Labels – PO ${po}</title>
+<title>Pallet Labels – PO ${esc(po)}</title>
 <style>
   @page { size: 4in 6in; margin: 0; }
   * { box-sizing: border-box; }
@@ -510,7 +561,7 @@ Extract EVERY line item. Do not skip any rows.`,
           <Button onClick={handleAiImport} disabled={!aiFile || aiLoading} className="bg-purple-600 hover:bg-purple-700 flex-shrink-0">
             {aiLoading ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" />Extracting...</> : <><Sparkles className="w-4 h-4 mr-1" />Extract with AI</>}
           </Button>
-          <Button variant="outline" size="sm" onClick={() => { setData(EMPTY_DATA); setAiFile(null); setAiFileUrl(null); setAiFileName(null); setAiError(""); setParseStatus(""); }} className="flex-shrink-0 text-gray-500">
+          <Button variant="outline" size="sm" onClick={() => { setCurrentInvoiceId(null); setData(EMPTY_DATA); setAiFile(null); setAiFileUrl(null); setAiFileName(null); setAiError(""); setParseStatus(""); }} className="flex-shrink-0 text-gray-500">
             <RefreshCw className="w-4 h-4 mr-1" /> Reset
           </Button>
         </div>
@@ -527,6 +578,19 @@ Extract EVERY line item. Do not skip any rows.`,
           <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
             <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
             {aiError}
+          </div>
+        )}
+
+        {/* Catalog side effects — informational, never blocking */}
+        {catalogNotice && (
+          <div className="flex items-start justify-between gap-2 bg-blue-50 border border-blue-200 rounded-lg p-3 text-blue-800 text-sm">
+            <span>{catalogNotice}</span>
+            <button
+              onClick={() => setCatalogNotice("")}
+              className="text-blue-500 hover:text-blue-700 text-xs"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 

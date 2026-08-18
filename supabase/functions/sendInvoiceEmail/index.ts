@@ -1,4 +1,6 @@
-import { createClientFromRequest, json, serve, HttpError } from '../_shared/base44-compat.ts';
+import {
+  createClientFromRequest, json, serve, HttpError, fetchBounded, escapeHtml,
+} from '../_shared/base44-compat.ts';
 import { PDFDocument } from 'npm:pdf-lib@1.17.1';
 
 // Mailgun encodes attachments as base64 (~33% overhead), so limit raw bytes to 37MB → ~49MB encoded
@@ -37,32 +39,60 @@ async function sendEmail({ apiKey, domain, from, to, bcc, subject, body, htmlBod
 
 serve(async (req) => {
   try {
-    const base44 = createClientFromRequest(req);
-    const user = await base44.auth.me();
-    if (!user) return json(req, { error: 'Unauthorized' }, 401);
+    const base44 = await createClientFromRequest(req);
+    const user = await base44.auth.me(); // throws 401 if the JWT is missing/expired
 
-    const { to, subject, body, from_email, from_name, attachments } = await req.json();
+    const { to, subject, body, attachments } = await req.json();
     if (!to || !subject || !body) {
       return json(req, { error: 'Missing required fields: to, subject, body' }, 400);
     }
 
+    // Recipients: validate and bound. Mailgun accepts a comma-separated list,
+    // so an unvalidated `to` turns this into a mass-mail relay that is fully
+    // SPF/DKIM-signed by the company domain.
+    const recipients = String(to)
+      .split(',')
+      .map((r: string) => r.trim())
+      .filter(Boolean);
+    if (recipients.length === 0 || recipients.length > 10) {
+      throw new HttpError('Provide between 1 and 10 recipients.', 400);
+    }
+    for (const r of recipients) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r)) {
+        throw new HttpError(`Not a valid email address: ${r}`, 400);
+      }
+    }
+
     const settings = await base44.asServiceRole.entities.AppSettings.list();
     const s = settings[0] || {};
-    const apiKey = Deno.env.get('MAILGUN_API_KEY') ?? s.mailgun_api_key;
+    // The API key comes from function env only. It used to fall back to a
+    // column in app_settings, which every authenticated user could read.
+    const apiKey = Deno.env.get('MAILGUN_API_KEY');
     const domain = Deno.env.get('MAILGUN_DOMAIN') ?? s.mailgun_domain;
-    const finalFromEmail = from_email || s.mailgun_from_email || `noreply@${domain}`;
-    const finalFromName = from_name || s.mailgun_from_name || 'Shipping Hub';
+    // The sender is configuration, not caller input: accepting from_email
+    // from the client let any user send mail as anyone at the company.
+    const finalFromEmail = s.mailgun_from_email || `noreply@${domain}`;
+    const finalFromName = s.mailgun_from_name || 'Shipping Hub';
 
-    if (!apiKey || !domain) {
-      return json(req, { error: 'Mailgun not configured. Go to Settings > Email.' }, 400);
+    if (!apiKey) {
+      throw new HttpError(
+        'MAILGUN_API_KEY is not configured on this function. Set it with `supabase secrets set`.',
+        503,
+      );
+    }
+    if (!domain) {
+      throw new HttpError('Mailgun domain is not configured. Go to Settings > Email.', 400);
     }
 
     const logoUrl = s.logo_url || '';
     const companyName = s.company_name || finalFromName;
-    const bodyHtml = body.replace(/\n/g, '<br>');
+    // `body` and `logo_url` are user-controlled. Interpolated raw, they let a
+    // user inject markup — a fake remittance block, or a broken img tag —
+    // into mail that customers receive from the company's own domain.
+    const bodyHtml = escapeHtml(body).replace(/\n/g, '<br>');
     const htmlBody = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:600px;">
   <div style="line-height:1.6;">${bodyHtml}</div>
-  ${logoUrl ? `<div style="margin-top:32px;border-top:1px solid #e5e7eb;padding-top:16px;"><img src="${logoUrl}" alt="${companyName}" style="max-height:48px;max-width:180px;object-fit:contain;" /></div>` : ''}
+  ${logoUrl ? `<div style="margin-top:32px;border-top:1px solid #e5e7eb;padding-top:16px;"><img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(companyName)}" style="max-height:48px;max-width:180px;object-fit:contain;" /></div>` : ''}
 </div>`;
     const from = `${finalFromName} <${finalFromEmail}>`;
 
@@ -71,14 +101,21 @@ serve(async (req) => {
     for (const att of (attachments || [])) {
       let bytes;
       if (att.base64) {
+        if (typeof att.base64 !== 'string' || att.base64.length > 40 * 1024 * 1024) {
+          throw new HttpError(`Attachment ${att.filename} is too large.`, 413);
+        }
         // base64-encoded PDF passed directly (used for split invoices)
-        const binary = atob(att.base64);
-        bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        let binary: string;
+        try {
+          binary = atob(att.base64);
+        } catch {
+          throw new HttpError(`Attachment ${att.filename} is not valid base64.`, 400);
+        }
+        bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
       } else {
-        const fileResp = await fetch(att.url);
-        if (!fileResp.ok) throw new Error(`Failed to fetch: ${att.filename}`);
-        bytes = new Uint8Array(await fileResp.arrayBuffer());
+        // Validated + size-capped: an unrestricted server-side fetch here is
+        // an SSRF that exfiltrates the response by emailing it.
+        ({ bytes } = await fetchBounded(att.url));
       }
       fetched.push({ bytes, filename: att.filename });
     }
@@ -107,7 +144,7 @@ serve(async (req) => {
 
     console.log(`Sending ${batches.length} email(s) for ${fetched.length} attachment(s)`);
 
-    const ids = [];
+    const ids: string[] = [];
     for (let i = 0; i < batches.length; i++) {
       const batchSubject = batches.length > 1 ? `${subject} (${i + 1}/${batches.length})` : subject;
       const batchBody = batches.length > 1
@@ -116,15 +153,43 @@ serve(async (req) => {
       const batchHtml = batches.length > 1
         ? htmlBody + `<p style="color:#6b7280;font-size:12px;margin-top:16px;">Email ${i + 1} of ${batches.length} — ${batches[i].length} attachment(s)</p>`
         : htmlBody;
-      const id = await sendEmail({ apiKey, domain, from, to, bcc: s.mailgun_bcc, subject: batchSubject, body: batchBody, htmlBody: batchHtml, files: batches[i] });
-      ids.push(id);
-      console.log(`Sent batch ${i + 1}/${batches.length}: ${id}`);
+      try {
+        const id = await sendEmail({
+          apiKey, domain, from, to: recipients.join(','), bcc: s.mailgun_bcc,
+          subject: batchSubject, body: batchBody, htmlBody: batchHtml, files: batches[i],
+        });
+        ids.push(id);
+        console.log(`Sent batch ${i + 1}/${batches.length}: ${id}`);
+      } catch (batchError) {
+        // Batches before this one are already in the customer's inbox.
+        // Reporting a bare failure made the user retry the whole send, so
+        // the customer received those invoices twice. Report what landed and
+        // where to resume instead.
+        console.error(
+          `Batch ${i + 1}/${batches.length} failed after ${ids.length} sent:`,
+          (batchError as Error).message,
+        );
+        return json(req, {
+          success: false,
+          partial: ids.length > 0,
+          emails_sent: ids.length,
+          ids,
+          failed_batch: i + 1,
+          total_batches: batches.length,
+          resume_from_batch: i + 1,
+          error: `Sent ${ids.length} of ${batches.length} emails, then failed on batch ${i + 1}: ${
+            (batchError as Error).message
+          }`,
+        }, 207);
+      }
     }
 
     return json(req, { success: true, emails_sent: ids.length, ids });
 
   } catch (error) {
-    console.error('Error:', error.message);
-    return json(req, { error: error.message }, 500);
+    // Let serve() classify it: hardcoding 500 turned an expired JWT into a
+    // server error, so the client could never tell "log in again" from
+    // "the server is broken".
+    throw error;
   }
 });

@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import { base44 } from "@/api/base44Client";
-import { getGeminiKey, setGeminiKey, isGeminiConfigured, uploadFile } from "@/lib/aiClient";
+import { uploadFile } from "@/lib/aiClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Upload, Save, LogOut, Palette, Building2, User, ImageIcon, Mail, Eye, EyeOff, Cpu } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { friendlyErrorMessage } from "@/lib/errors";
 
 const TABS = [
   { id: "company", label: "Company Info", icon: Building2 },
@@ -55,16 +56,6 @@ const DEFAULT_SETTINGS = {
 // CommercialInvoice.jsx / CustomerDocs.jsx — gives a clear message instead
 // of a raw error string when integration credits run out or a backend
 // function isn't available on the current plan.
-function friendlyErrorMessage(err, fallback) {
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  if (err?.response?.status === 402 || msg.includes("credit") || msg.includes("payment required")) {
-    return "Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.";
-  }
-  if (err?.response?.status === 403 || msg.includes("backend functions") || msg.includes("lacks") || msg.includes("capability")) {
-    return "Sending email needs backend functions, which aren't available on the current Base44 plan.";
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -73,6 +64,7 @@ export default function Settings() {
   const [activeTab, setActiveTab] = useState("company");
   const [form, setForm] = useState(DEFAULT_SETTINGS);
   const [settingsId, setSettingsId] = useState(null);
+  const hydratedRef = useRef(false);
   const [logoUploading, setLogoUploading] = useState(false);
   const [logoError, setLogoError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -80,8 +72,6 @@ export default function Settings() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [testEmailAddress, setTestEmailAddress] = useState("");
   const [testEmailStatus, setTestEmailStatus] = useState(null);
-  const [apiKey, setApiKey] = useState(() => getGeminiKey());
-  const [aiSaved, setAiSaved] = useState(false);
 
   const { data: settingsList = [] } = useQuery({
     queryKey: ["appsettings"],
@@ -96,7 +86,14 @@ export default function Settings() {
     if (settingsList.length > 0) {
       const s = settingsList[0];
       setSettingsId(s.id);
-      setForm({ ...DEFAULT_SETTINGS, ...s });
+      // Hydrate ONCE. `settingsList` is a new array identity on every fetch,
+      // so this effect re-ran on each refetch — including the one triggered by
+      // saving — and replaced whatever the user had typed in the meantime with
+      // server values, silently and with no warning.
+      if (!hydratedRef.current) {
+        hydratedRef.current = true;
+        setForm({ ...DEFAULT_SETTINGS, ...s });
+      }
     }
   }, [settingsList]);
 
@@ -152,7 +149,10 @@ export default function Settings() {
         subject: "Test Email from Shipping Hub",
         body: "This is a test email to confirm your Mailgun configuration is working correctly.\n\nIf you received this, email is set up!",
       });
-      setTestEmailStatus(resp.data?.success ? "sent" : "error: " + friendlyErrorMessage({ message: resp.data?.error }, "Unknown error"));
+      // The adapter returns the Edge Function body directly; there is no axios
+      // `.data` wrapper, so this always read undefined and reported a
+      // successful send as an error.
+      setTestEmailStatus(resp?.success ? "sent" : "error: " + friendlyErrorMessage({ message: resp?.error }, "Unknown error"));
     } catch (err) {
       setTestEmailStatus("error: " + friendlyErrorMessage(err, "Unknown error"));
     }
@@ -372,26 +372,27 @@ export default function Settings() {
           {/* AI Provider */}
           {activeTab === "ai" && (
             <>
-              <h2 className="font-semibold text-gray-800 text-base">Gemini API</h2>
+              <h2 className="font-semibold text-gray-800 text-base">AI document parsing</h2>
               <p className="text-xs text-gray-500 -mt-3">
-                AI document parsing (Customer Documents, Commercial Invoice, TJX Canada) calls the Google Gemini API
-                directly with this key. Stored locally in this browser only — not in the database.
+                Customer Documents, Commercial Invoice and TJX Canada use Google Gemini to read
+                uploaded PDFs.
               </p>
 
-              <div>
-                <Label className="text-xs">Gemini API Key</Label>
-                <Input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="AIza…" className="h-8 text-sm mt-1" />
-              </div>
-
-              <div className="flex items-center gap-3 pt-1">
-                <Button size="sm" onClick={() => { setGeminiKey(apiKey); setAiSaved(true); setTimeout(() => setAiSaved(false), 2500); }} className={aiSaved ? "bg-green-600 hover:bg-green-700" : ""}>
-                  <Save className="w-3 h-3 mr-1" />{aiSaved ? "✓ Saved" : "Save Key"}
-                </Button>
-                {isGeminiConfigured() ? (
-                  <span className="text-xs text-green-600">✓ Gemini API key configured</span>
-                ) : (
-                  <span className="text-xs text-amber-600">Not configured — AI document parsing is disabled</span>
-                )}
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 space-y-2">
+                <p className="text-xs text-slate-700">
+                  <span className="font-medium">The API key is now held on the server.</span>{" "}
+                  It used to be stored in this browser, where any script on the page could read it
+                  and it could not be rotated centrally. Requests now go through the{" "}
+                  <code className="text-[11px] bg-white px-1 py-0.5 rounded border">llm</code>{" "}
+                  Edge Function, which keeps the key server-side and rate-limits per user.
+                </p>
+                <p className="text-xs text-slate-600">
+                  To set or rotate it:
+                </p>
+                <pre className="text-[11px] bg-white border rounded p-2 overflow-x-auto">supabase secrets set GEMINI_API_KEY=...</pre>
+                <p className="text-xs text-amber-700">
+                  If a key was previously saved here, treat it as compromised and rotate it.
+                </p>
               </div>
             </>
           )}

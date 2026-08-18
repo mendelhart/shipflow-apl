@@ -9,12 +9,16 @@ import { Label } from "@/components/ui/label";
 import CartonLabel from "@/components/documents/CartonLabel";
 import { formatPoNumber } from "@/utils/poNumber";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
+import { labelPlan } from "@/domain/labelContent";
 
 export default function Labels() {
   const navigate = useNavigate();
   const urlParams = new URLSearchParams(window.location.search);
 
   const [selectedPO, setSelectedPO] = useState(urlParams.get("po") || "");
+
+  const [pdfProgress, setPdfProgress] = useState(null);
+  const [pdfError, setPdfError] = useState(null);
   const [startBox, setStartBox] = useState(1);
 
   const { data: pos = [] } = useQuery({
@@ -33,44 +37,55 @@ export default function Labels() {
     ? vendors.find(v => v.id === po.vendor_id)
     : null;
 
-  const handlePrint = () => window.print();
+  const { plan: labelPlanItems, total: totalCartons } = labelPlan(po || {}, startBox);
+
+  // Both buttons build the SAME document. Previously "Print" used the DOM and
+  // "PDF" rasterised that DOM, so the two paths could diverge; now there is one
+  // renderer and the preview below is explicitly a sample.
+  const buildLabels = async () => {
+    const { buildCartonLabelsPdf } = await import("@/lib/cartonLabelPdf");
+    setPdfError(null);
+    setPdfProgress({ done: 0, total: totalCartons });
+    try {
+      const { doc } = await buildCartonLabelsPdf({
+        po,
+        startBox,
+        onProgress: (done, total) => setPdfProgress({ done, total }),
+      });
+      return doc;
+    } finally {
+      setPdfProgress(null);
+    }
+  };
 
   const handleDownload = async () => {
-    const { default: html2canvas } = await import("html2canvas");
-    // FIX: jspdf exports jsPDF as a NAMED export, not a default export.
-    // Destructuring `default` here gave `undefined`, so `new jsPDF(...)`
-    // would throw "jsPDF is not a constructor" the first time this ran.
-    // (CommercialInvoice.jsx already uses the correct form elsewhere.)
-    const { jsPDF } = await import("jspdf");
-
-    const container = document.getElementById("printable-labels");
-    if (!container) return;
-
-    const labels = Array.from(
-      container.querySelectorAll("[data-label]")
-    );
-
-    const pdf = new jsPDF({
-      unit: "pt",
-      format: [288, 432], // 4x6 inches
-      orientation: "portrait"
-    });
-
-    for (let i = 0; i < labels.length; i++) {
-      const canvas = await html2canvas(labels[i], {
-        scale: 3,
-        useCORS: true,
-        backgroundColor: "#ffffff"
-      });
-
-      const img = canvas.toDataURL("image/png");
-
-      if (i > 0) pdf.addPage([288, 432], "portrait");
-
-      pdf.addImage(img, "PNG", 0, 0, 288, 432);
+    try {
+      const doc = await buildLabels();
+      doc.save(`carton_labels_${po?.po_number || "export"}.pdf`);
+    } catch (err) {
+      console.error("Carton label PDF failed:", err);
+      setPdfError(err?.message || "Could not generate the labels.");
     }
+  };
 
-    pdf.save(`carton_labels_${po?.po_number || "export"}.pdf`);
+  const handlePrint = async () => {
+    try {
+      const doc = await buildLabels();
+      // Hand the browser the real document rather than printing the preview:
+      // the preview is a sample, and printing it would produce one label per
+      // item instead of one per carton.
+      doc.autoPrint();
+      const url = doc.output("bloburl");
+      const win = window.open(url, "_blank");
+      if (!win) {
+        setPdfError(
+          "Your browser blocked the print window. Allow pop-ups for this site, or use Download PDF."
+        );
+      }
+    } catch (err) {
+      console.error("Carton label print failed:", err);
+      setPdfError(err?.message || "Could not prepare the labels for printing.");
+    }
   };
 
   return (
@@ -107,10 +122,13 @@ export default function Labels() {
               className="h-8 w-16"
             />
           </div>
-          <Button size="sm" onClick={handleDownload} disabled={!po}>
-            <Download className="w-4 h-4 mr-1" />PDF
+          <Button size="sm" onClick={handleDownload} disabled={!po || !!pdfProgress}>
+            <Download className="w-4 h-4 mr-1" />
+            {pdfProgress
+              ? `${pdfProgress.done}/${pdfProgress.total}`
+              : "PDF"}
           </Button>
-          <Button size="sm" onClick={handlePrint} disabled={!po}>
+          <Button size="sm" onClick={handlePrint} disabled={!po || !!pdfProgress}>
             <Printer className="w-4 h-4 mr-1" />Print
           </Button>
         </div>
@@ -139,84 +157,60 @@ export default function Labels() {
         )}
 
         {po && vendor && (
-          <div id="printable-labels">
-            <CartonLabelSet
-              po={po}
-              vendor={vendor}
-              startBox={startBox}
-            />
-          </div>
+          <>
+            <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
+              <div className="text-sm text-slate-700">
+                <span className="font-medium">
+                  {totalCartons.toLocaleString()} label{totalCartons === 1 ? "" : "s"}
+                </span>{" "}
+                will be produced — one per carton, numbered from {startBox}.
+              </div>
+              <div className="text-xs text-slate-500">
+                Preview shows one sample per item
+              </div>
+            </div>
+
+            {pdfError && (
+              <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {pdfError}
+              </div>
+            )}
+
+            <div id="printable-labels">
+              {labelPlanItems.map(({ item, cartons }) => (
+                <div key={item.item_number} className="mb-6">
+                  <div className="mb-1 text-xs font-medium text-slate-500">
+                    {item.item_number} — {item.description} · {cartons} carton
+                    {cartons === 1 ? "" : "s"}
+                  </div>
+                  <div
+                    data-label
+                    style={{
+                      width: "4in",
+                      height: "6in",
+                      overflow: "hidden",
+                      display: "block",
+                      boxSizing: "border-box",
+                      border: "1px solid #e2e8f0",
+                    }}
+                  >
+                    <CartonLabel
+                      po={po}
+                      vendor={vendor}
+                      item={item}
+                      boxNumber={startBox}
+                      totalBoxes={cartons}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
 
-      {/* PRINT CSS */}
-      <style>{`
-        @media print {
-          .no-print { display: none !important; }
-
-          @page {
-            size: 4in 6in;
-            margin: 0;
-          }
-
-          html, body {
-            margin: 0;
-            padding: 0;
-          }
-
-          #printable-labels {
-            margin: 0;
-            padding: 0;
-          }
-
-          [data-label] {
-            page-break-after: always;
-            break-after: page;
-          }
-        }
-      `}</style>
+      {/* Printing goes through the generated PDF (see handlePrint), not the
+          browser's print view of this page — the page only shows samples. */}
     </div>
   );
-}
-
-/* =========================
-   LABEL SET (FIXED 4x6)
-========================= */
-function CartonLabelSet({ po, vendor, startBox }) {
-  const items = po.items || [];
-  const labels = [];
-
-  items.forEach(item => {
-    const cartons = parseInt(item.num_cartons) || 0;
-
-    for (let i = 0; i < cartons; i++) {
-      labels.push(
-        <div
-          key={`${item.item_number}-${i}`}
-          data-label
-          style={{
-            width: "4in",
-            height: "6in",
-            overflow: "hidden",
-            display: "block",
-            pageBreakAfter: "always",
-            breakAfter: "page",
-            boxSizing: "border-box"
-          }}
-        >
-          <div style={{ width: "100%", height: "100%" }}>
-            <CartonLabel
-              po={po}
-              vendor={vendor}
-              item={item}
-              boxNumber={i + startBox}
-              totalBoxes={cartons}
-            />
-          </div>
-        </div>
-      );
-    }
-  });
-
-  return <div>{labels}</div>;
 }

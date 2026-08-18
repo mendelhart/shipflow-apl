@@ -77,9 +77,8 @@ function tryRegex(text) {
 
 serve(async (req) => {
   try {
-    const base44 = createClientFromRequest(req);
-    const user = await base44.auth.me();
-    if (!user) return json(req, { error: 'Unauthorized' }, 401);
+    const base44 = await createClientFromRequest(req);
+    const user = await base44.auth.me(); // throws 401 if the JWT is missing/expired
 
     const { file_url, file_name, file_base64 } = await req.json();
     if (!file_url) return json(req, { error: 'No file_url provided' }, 400);
@@ -140,7 +139,8 @@ serve(async (req) => {
     return json(req, { po_number: poNumber });
 
   } catch (error) {
-    console.error('Fatal error:', error.message);
-    return json(req, { error: error.message }, 500);
+    // serve() maps HttpError.status correctly; hardcoding 500 here made
+    // every auth or validation failure look like a server crash.
+    throw error;
   }
 });

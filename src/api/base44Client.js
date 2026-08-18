@@ -13,10 +13,14 @@
  *
  * Deliberate behavioural notes:
  *
- *  - list()/filter() with no limit fetch EVERY row via keyset pagination.
- *    Supabase caps a single response at 1000 rows; Base44 did not. Without
- *    this loop any table past 1000 records silently truncates — the kind of
- *    bug that surfaces months later as "some old orders disappeared".
+ *  - list()/filter() with no limit fetch EVERY row by paging. Supabase caps a
+ *    single response at 1000 rows; Base44 did not. Without this loop any table
+ *    past 1000 records silently truncates — the kind of bug that surfaces
+ *    months later as "some old orders disappeared".
+ *
+ *    It is OFFSET paging (.range), not keyset. That is only safe because
+ *    applySort appends `id` as a tiebreaker, giving a total order; without it,
+ *    rows sharing a created_date could appear on two pages or on none.
  *
  *  - Errors are thrown, never swallowed, and carry .status so the existing
  *    `error.status === 401` checks in AuthContext keep working.
@@ -26,6 +30,15 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import {
+  Base44CompatError,
+  raise,
+  toTable,
+  applySort,
+  applyWhere,
+  nullifyBlanks,
+  fetchAll,
+} from '@/api/adapterCore';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -54,101 +67,6 @@ const publicDb =
         db: { schema: 'public' },
       });
 
-/* ------------------------------------------------------------------ utils */
-
-/** Base44 entity name (PurchaseOrder) -> Postgres table (purchase_order). */
-const toTable = (entity) =>
-  entity
-    .replace(/(.)([A-Z][a-z]+)/g, '$1_$2')
-    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-    .toLowerCase();
-
-/** Preserve Base44's error shape: message + numeric status. */
-class Base44CompatError extends Error {
-  constructor(message, status, details) {
-    super(message);
-    this.name = 'Base44CompatError';
-    this.status = status ?? 500;
-    this.details = details;
-  }
-}
-
-const raise = (error, context) => {
-  if (!error) return;
-  const status =
-    Number(error.status) ||
-    ({ PGRST301: 401, '42501': 403, '23505': 409, '23503': 409 }[error.code] ?? 500);
-  throw new Base44CompatError(`${context}: ${error.message}`, status, error);
-};
-
-/**
- * Base44 sort strings: 'field' ascending, '-field' descending.
- * Base44's implicit default was newest-first.
- */
-const applySort = (query, sort) => {
-  const spec = sort || '-created_date';
-  for (const raw of String(spec).split(',')) {
-    const field = raw.trim();
-    if (!field) continue;
-    const desc = field.startsWith('-');
-    query = query.order(desc ? field.slice(1) : field, {
-      ascending: !desc,
-      nullsFirst: false,
-    });
-  }
-  return query;
-};
-
-/** Mongo-ish operators Base44 accepted in filter(). */
-const applyWhere = (query, where) => {
-  for (const [field, condition] of Object.entries(where || {})) {
-    if (condition === null) {
-      query = query.is(field, null);
-    } else if (Array.isArray(condition)) {
-      query = query.in(field, condition);
-    } else if (typeof condition === 'object') {
-      for (const [op, value] of Object.entries(condition)) {
-        switch (op) {
-          case '$in':       query = query.in(field, value); break;
-          case '$nin':      query = query.not(field, 'in', `(${value.join(',')})`); break;
-          case '$ne':       query = query.neq(field, value); break;
-          case '$gt':       query = query.gt(field, value); break;
-          case '$gte':      query = query.gte(field, value); break;
-          case '$lt':       query = query.lt(field, value); break;
-          case '$lte':      query = query.lte(field, value); break;
-          case '$contains': query = query.ilike(field, `%${value}%`); break;
-          case '$exists':   query = value ? query.not(field, 'is', null) : query.is(field, null); break;
-          default:
-            throw new Base44CompatError(`Unsupported filter operator "${op}"`, 400);
-        }
-      }
-    } else {
-      query = query.eq(field, condition);
-    }
-  }
-  return query;
-};
-
-const PAGE_SIZE = 1000; // Supabase hard cap per response
-
-/** Fetch every matching row, not just the first page. */
-async function fetchAll(build, limit, context) {
-  if (limit && limit <= PAGE_SIZE) {
-    const { data, error } = await build().range(0, limit - 1);
-    raise(error, context);
-    return data ?? [];
-  }
-  const rows = [];
-  for (let from = 0; ; from += PAGE_SIZE) {
-    const to = Math.min(from + PAGE_SIZE, limit ?? Infinity) - 1;
-    const { data, error } = await build().range(from, to);
-    raise(error, context);
-    rows.push(...(data ?? []));
-    if (!data || data.length < PAGE_SIZE || (limit && rows.length >= limit)) break;
-  }
-  return limit ? rows.slice(0, limit) : rows;
-}
-
 /* --------------------------------------------------------------- entities */
 
 function entityApi(entityName) {
@@ -176,7 +94,11 @@ function entityApi(entityName) {
     },
 
     async create(values) {
-      const { data, error } = await supabase.from(table).insert(values).select().single();
+      const { data, error } = await supabase
+        .from(table)
+        .insert(nullifyBlanks(values))
+        .select()
+        .single();
       raise(error, `${ctx}.create`);
       return data;
     },
@@ -188,7 +110,7 @@ function entityApi(entityName) {
       for (let i = 0; i < records.length; i += 500) {
         const { data, error } = await supabase
           .from(table)
-          .insert(records.slice(i, i + 500))
+          .insert(nullifyBlanks(records.slice(i, i + 500)))
           .select();
         raise(error, `${ctx}.bulkCreate`);
         created.push(...(data ?? []));
@@ -199,7 +121,7 @@ function entityApi(entityName) {
     async update(id, values) {
       const { data, error } = await supabase
         .from(table)
-        .update(values)
+        .update(nullifyBlanks(values))
         .eq('id', id)
         .select()
         .single();
@@ -208,8 +130,21 @@ function entityApi(entityName) {
     },
 
     async delete(id) {
-      const { error } = await supabase.from(table).delete().eq('id', id);
+      // Without .select() a delete that matched nothing — because RLS
+      // filtered the row out, or it was already gone — returns no error,
+      // and the UI happily confirms a deletion that never happened.
+      const { data, error } = await supabase
+        .from(table)
+        .delete()
+        .eq('id', id)
+        .select('id');
       raise(error, `${ctx}.delete`);
+      if (!data || data.length === 0) {
+        throw new Base44CompatError(
+          `${entityName} ${id} was not deleted — it no longer exists, or you do not have permission.`,
+          404
+        );
+      }
       return { success: true };
     },
   };
@@ -242,13 +177,16 @@ const auth = {
       .eq('id', user.id)
       .maybeSingle();
 
+    // Spread the profile FIRST: the computed fields below are fallbacks and
+    // must not be clobbered by null columns on the profile row.
     return {
+      ...profile,
       id: user.id,
       email: user.email,
-      full_name: profile?.full_name ?? user.user_metadata?.full_name ?? '',
-      role: profile?.role ?? 'user',
+      full_name: profile?.full_name || user.user_metadata?.full_name || '',
+      role: profile?.role || 'user',
+      is_active: profile?.is_active ?? false,
       created_date: user.created_at,
-      ...profile,
     };
   },
 

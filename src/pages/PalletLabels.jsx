@@ -17,7 +17,7 @@ export default function PalletLabels() {
   });
 
   const { data: settings = [] } = useQuery({
-    queryKey: ["appSettings"],
+    queryKey: ["appsettings"],
     queryFn: () => base44.entities.AppSettings.list(),
   });
   const appSettings = settings?.[0] || {};

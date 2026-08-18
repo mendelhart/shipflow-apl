@@ -1,16 +1,26 @@
 import { useState } from "react";
 import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import jsPDF from "jspdf";
-import html2canvas from "html2canvas";
+
 
 export default function PdfDownloadButton({ contentId, title }) {
   const [loading, setLoading] = useState(false);
+
+  const [error, setError] = useState(null);
 
   const handleDownload = async () => {
     const el = document.getElementById(contentId);
     if (!el) return;
     setLoading(true);
+    setError(null);
+
+    try {
+    // Loaded on demand: keeps the 1.1 MB PDF chunk out of every route that
+    // merely renders a PrintWrapper.
+    const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+      import("jspdf"),
+      import("html2canvas"),
+    ]);
 
     const pdf = new jsPDF({ orientation: "portrait", unit: "in", format: "letter" });
     const pageW = 8.5;
@@ -53,13 +63,24 @@ export default function PdfDownloadButton({ contentId, title }) {
     }
 
     pdf.save(`${title.replace(/\s+/g, "_")}.pdf`);
-    setLoading(false);
+    } catch (err) {
+      // Without this the button stayed disabled on "Generating…" forever —
+      // html2canvas throws on a tainted canvas (a cross-origin logo) or an
+      // oversized render, and setLoading(false) was never reached.
+      console.error("PDF generation failed:", err);
+      setError(err?.message || "Could not generate the PDF.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
+    <span className="inline-flex items-center gap-2">
     <Button variant="outline" size="sm" onClick={handleDownload} disabled={loading}>
       <Download className="w-4 h-4 mr-1" />
       {loading ? "Generating..." : "Download PDF"}
     </Button>
+    {error && <span className="text-xs text-red-600">{error}</span>}
+    </span>
   );
 }

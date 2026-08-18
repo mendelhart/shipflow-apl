@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, SplitSquareHorizontal, Square, Save,
   ChevronDown, ChevronUp, Tag, Printer, Download,
-  CheckCircle, Edit2,
+  CheckCircle, Edit2, Plus,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,9 @@ import POGroupedSelector from "@/components/shared/POGroupedSelector";
 import SavedSclpBrowser from "@/components/sclp/SavedSclpBrowser";
 import { buildSCLPHtml, openSCLPWindow } from "@/utils/sclpExport";
 import { openPalletLabelsWindow } from "@/utils/palletLabels";
-import { format } from "date-fns";
+import { bumpStatus } from "@/domain/poStatus";
+import { friendlyErrorMessage } from "@/lib/errors";
+import { formatDate } from "@/lib/dates";
 
 const FIELD_DEFAULTS = {
   loadType: "FCL – Full Container Load",
@@ -33,15 +35,6 @@ const FIELD_DEFAULTS = {
   actualDeliveryDate: "",
 };
 
-// Status auto-progresses forward only (draft < ready < booked < shipped <
-// invoiced) — never downgrades a PO that's already further along.
-const STATUS_ORDER = ["draft", "ready", "booked", "shipped", "invoiced"];
-function bumpStatus(current, target) {
-  const cur = STATUS_ORDER.indexOf(current || "draft");
-  const tgt = STATUS_ORDER.indexOf(target);
-  if (tgt === -1) return current || "draft";
-  return tgt > cur ? target : (current || "draft");
-}
 
 // Compares two PO-id arrays regardless of order — used to find a
 // previously saved SCLP that exactly matches the current PO selection.
@@ -72,12 +65,21 @@ export default function SCLP() {
   const [fields, setFields] = useState(FIELD_DEFAULTS);
   const [palletOverrides, setPalletOverrides] = useState({});
   const [savingPallets, setSavingPallets] = useState({});
+  const [palletError, setPalletError] = useState({});
 
   // Up to 3 containers (split mode): number / seal / pallets each.
   const [containers, setContainers] = useState(emptyContainers);
+  // How many of those three are shown. A split is at least two containers;
+  // rendering all three unconditionally made the form look like it demanded
+  // details nobody had, and left blank container rows on screen for every
+  // two-container shipment.
+  const [containerCount, setContainerCount] = useState(2);
 
   // SCLP record state
   const [currentSclpId, setCurrentSclpId] = useState(null);
+  // A saved SCLP that matches the current selection but was NOT auto-loaded
+  // because the form has unsaved edits.
+  const [pendingMatch, setPendingMatch] = useState(null);
   const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | error
   const [savedRecordsOpen, setSavedRecordsOpen] = useState(false);
 
@@ -109,6 +111,21 @@ export default function SCLP() {
     setSaveStatus("idle");
   };
 
+  // Removing a container clears its values too, so a hidden third container
+  // cannot keep contributing stale numbers to the saved record.
+  const removeLastContainer = () => {
+    setContainerCount(n => {
+      const next = Math.max(2, n - 1);
+      setContainers(prev => prev.map((c, i) => (i >= next ? { number: "", seal: "", pallets: "" } : c)));
+      return next;
+    });
+    setSaveStatus("idle");
+  };
+
+  const totalSplitPallets = containers
+    .slice(0, containerCount)
+    .reduce((sum, c) => sum + (parseInt(c.pallets, 10) || 0), 0);
+
   const togglePO = (id) => {
     setSelectedPOs(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
     setSplits({});
@@ -122,9 +139,25 @@ export default function SCLP() {
   useEffect(() => {
     if (selectedPOs.length === 0 || currentSclpId) return;
     const match = savedSclps.find(r => sameIdSet(r.po_ids || [], selectedPOs));
-    if (match) handleLoadSclp(match);
+    if (!match) return;
+    // Only auto-load into an untouched form. Previously, ticking one more PO
+    // could make the selection match an SCLP saved weeks ago, and every
+    // container/seal/vessel field the user had just typed was replaced with no
+    // prompt and no undo.
+    if (isFormDirty()) {
+      setPendingMatch(match);
+      return;
+    }
+    handleLoadSclp(match);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPOs, savedSclps]);
+
+  // Has the user typed anything that an auto-load would destroy?
+  const isFormDirty = () =>
+    JSON.stringify(fields) !== JSON.stringify(FIELD_DEFAULTS) ||
+    Object.keys(palletOverrides).length > 0 ||
+    Object.keys(splits).length > 0 ||
+    containers.some(c => c.number || c.seal || (c.pallets !== "" && c.pallets != null));
 
   // ── Pallets ─────────────────────────────────────────────
   const handlePalletChange = (poId, val) => {
@@ -135,10 +168,24 @@ export default function SCLP() {
   const savePallets = async (po) => {
     const override = palletOverrides[po.id];
     if (override === undefined || override === "") return;
+
+    // A number input accepts intermediate text like "-" or "1e", for which
+    // parseInt returns NaN. JSON.stringify turns NaN into null, so saving
+    // wiped the stored pallet count — and with no catch below, the failure
+    // was invisible: labels and the APL email then reported "N/A".
+    const pallets = parseInt(override, 10);
+    if (!Number.isFinite(pallets) || pallets < 0) {
+      setPalletError(prev => ({ ...prev, [po.id]: "Enter a whole number of pallets." }));
+      return;
+    }
+
+    setPalletError(prev => ({ ...prev, [po.id]: null }));
     setSavingPallets(prev => ({ ...prev, [po.id]: true }));
     try {
-      await base44.entities.PurchaseOrder.update(po.id, { total_pallets: parseInt(override) });
+      await base44.entities.PurchaseOrder.update(po.id, { total_pallets: pallets });
       queryClient.invalidateQueries({ queryKey: ["pos"] });
+    } catch (err) {
+      setPalletError(prev => ({ ...prev, [po.id]: friendlyErrorMessage(err, "Could not save the pallet count.") }));
     } finally {
       setSavingPallets(prev => ({ ...prev, [po.id]: false }));
     }
@@ -251,11 +298,16 @@ export default function SCLP() {
     setSplits(isNested ? loadedSplits : (poIds.length === 1 ? { [poIds[0]]: loadedSplits } : {}));
 
     const recContainers = record.containers;
-    setContainers(
-      recContainers && recContainers.length === 3
-        ? recContainers.map(c => ({ number: c.number || "", seal: c.seal || "", pallets: c.pallets ?? "" }))
-        : emptyContainers()
+    const loadedContainers = recContainers && recContainers.length === 3
+      ? recContainers.map(c => ({ number: c.number || "", seal: c.seal || "", pallets: c.pallets ?? "" }))
+      : emptyContainers();
+    setContainers(loadedContainers);
+    // Show exactly the containers this shipment actually used.
+    const used = loadedContainers.reduce(
+      (n, c, i) => (c.number || c.seal || (c.pallets !== "" && c.pallets != null) ? i + 1 : n),
+      0
     );
+    setContainerCount(Math.min(3, Math.max(2, used)));
 
     setSavedRecordsOpen(false);
     setSaveStatus("saved");
@@ -461,6 +513,31 @@ export default function SCLP() {
           </div>
         )}
 
+        {pendingMatch && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 no-print">
+            <span className="text-sm text-blue-900">
+              A saved SCLP matches this PO selection
+              {pendingMatch.booking_number ? ` (${pendingMatch.booking_number})` : ""}.
+              Loading it will replace what you have entered.
+            </span>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setPendingMatch(null)}
+              >
+                Keep my changes
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => { handleLoadSclp(pendingMatch); setPendingMatch(null); }}
+              >
+                Load saved SCLP
+              </Button>
+            </div>
+          </div>
+        )}
+
         {/* SHIPMENT DETAILS FORM */}
         {selectedPOObjects.length > 0 && (
           <div className="bg-white border rounded-xl mb-6 no-print">
@@ -500,15 +577,23 @@ export default function SCLP() {
                     </Select>
                   </div>
 
-                  <div>
-                    <Label className="text-xs">Container Number</Label>
-                    <Input placeholder="e.g. CSNU1234567" value={fields.containerNumber} onChange={e => setField("containerNumber", e.target.value)} />
-                  </div>
+                  {mode === "single" ? (
+                    <>
+                      <div>
+                        <Label className="text-xs">Container Number</Label>
+                        <Input placeholder="e.g. CSNU1234567" value={fields.containerNumber} onChange={e => setField("containerNumber", e.target.value)} />
+                      </div>
 
-                  <div>
-                    <Label className="text-xs">Seal Number</Label>
-                    <Input placeholder="e.g. SL-9876543" value={fields.sealNumber} onChange={e => setField("sealNumber", e.target.value)} />
-                  </div>
+                      <div>
+                        <Label className="text-xs">Seal Number</Label>
+                        <Input placeholder="e.g. SL-9876543" value={fields.sealNumber} onChange={e => setField("sealNumber", e.target.value)} />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="col-span-2 rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                      Container and seal numbers are set per container below.
+                    </div>
+                  )}
 
                   <div className="col-span-2">
                     <Label className="text-xs flex items-center gap-1">
@@ -599,6 +684,9 @@ export default function SCLP() {
                         {po.total_pallets && (
                           <span className="text-xs text-gray-400">Stored: {po.total_pallets}</span>
                         )}
+                        {palletError[po.id] && (
+                          <span className="text-xs text-red-600">{palletError[po.id]}</span>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -628,7 +716,7 @@ export default function SCLP() {
                 <div className="mt-5 pt-4 border-t flex items-center justify-between">
                   <p className="text-xs text-gray-500">
                     {currentSclpId
-                      ? `Last saved: ${currentRecord?.updated_date ? format(new Date(currentRecord.updated_date), "MMM d, yyyy h:mm a") : "—"}`
+                      ? `Last saved: ${currentRecord?.updated_date ? formatDate(currentRecord.updated_date, "MMM d, yyyy h:mm a") : "—"}`
                       : "This SCLP has not been saved yet."}
                   </p>
                   <Button
@@ -678,16 +766,61 @@ export default function SCLP() {
             ))}
 
             <div className="bg-white border rounded-xl p-4 mb-6 no-print">
-              <p className="text-sm font-semibold mb-3">Container, Seal & Pallets (Split)</p>
-              <div className="grid grid-cols-3 gap-4">
-                {containers.map((c, i) => (
-                  <div key={i} className="contents">
-                    <div><Label>{`Container ${i + 1} #`}</Label><Input value={c.number} onChange={e => setContainerField(i, "number", e.target.value)} /></div>
-                    <div><Label>{`Seal ${i + 1} #`}</Label><Input value={c.seal} onChange={e => setContainerField(i, "seal", e.target.value)} /></div>
-                    <div><Label>{`Pallets (C${i + 1})`}</Label><Input type="number" min={0} value={c.pallets} onChange={e => setContainerField(i, "pallets", e.target.value)} /></div>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-sm font-semibold">Containers</p>
+                <span className="text-xs text-gray-400">
+                  {containerCount} of 3 · {totalSplitPallets} pallet{totalSplitPallets === 1 ? "" : "s"} allocated
+                </span>
+              </div>
+
+              <div className="space-y-3">
+                {containers.slice(0, containerCount).map((c, i) => (
+                  <div key={i} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-slate-600">
+                        Container {i + 1}
+                      </span>
+                      {i === containerCount - 1 && containerCount > 2 && (
+                        <button
+                          type="button"
+                          onClick={removeLastContainer}
+                          className="text-xs text-slate-400 hover:text-red-600"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <Label className="text-xs">Container #</Label>
+                        <Input className="h-8 text-sm mt-1" placeholder="e.g. CSNU1234567"
+                          value={c.number} onChange={e => setContainerField(i, "number", e.target.value)} />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Seal #</Label>
+                        <Input className="h-8 text-sm mt-1" placeholder="e.g. SL-9876543"
+                          value={c.seal} onChange={e => setContainerField(i, "seal", e.target.value)} />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Pallets</Label>
+                        <Input className="h-8 text-sm mt-1" type="number" min={0}
+                          value={c.pallets} onChange={e => setContainerField(i, "pallets", e.target.value)} />
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
+
+              {containerCount < 3 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-3 h-8 text-xs gap-1.5"
+                  onClick={() => { setContainerCount(n => Math.min(3, n + 1)); setSaveStatus("idle"); }}
+                >
+                  <Plus className="w-3 h-3" /> Add a third container
+                </Button>
+              )}
             </div>
 
             <PrintWrapper title={`SCLP_SPLIT_${selectedPOObjects.map(p => p.po_number).join("_")}`}>

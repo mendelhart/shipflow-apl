@@ -12,13 +12,31 @@
 
 import { createClientFromRequest, json, serve, HttpError } from '../_shared/base44-compat.ts';
 
-/** Cheap in-memory throttle: an isolate handles many requests before recycling. */
+/**
+ * Cheap in-memory throttle. Two honest caveats:
+ *  - It is per-isolate, so the real ceiling is MAX_PER_WINDOW x live isolates.
+ *    It blunts a runaway client loop; it is not a billing control. For a hard
+ *    cap, count in Postgres.
+ *  - The map is swept so a user who calls once doesn't leave an entry pinned
+ *    for the isolate's lifetime.
+ */
 const hits = new Map<string, number[]>();
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 20;
+const MAX_TRACKED_USERS = 5_000;
+let lastSweep = 0;
+
+function sweep(now: number) {
+  if (now - lastSweep < WINDOW_MS && hits.size < MAX_TRACKED_USERS) return;
+  lastSweep = now;
+  for (const [key, times] of hits) {
+    if (times.every((t) => now - t >= WINDOW_MS)) hits.delete(key);
+  }
+}
 
 function rateLimit(userId: string) {
   const now = Date.now();
+  sweep(now);
   const recent = (hits.get(userId) ?? []).filter((t) => now - t < WINDOW_MS);
   if (recent.length >= MAX_PER_WINDOW) {
     throw new HttpError('Too many AI requests — wait a minute and try again.', 429);

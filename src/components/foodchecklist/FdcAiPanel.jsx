@@ -63,21 +63,33 @@ export default function FdcAiPanel({ selectedPOs, products, vendors = [] }) {
     setEStatus(`Looking up E-numbers for ${withIngs.length} product(s)…`);
 
     let updated = 0;
+    const failed = [];
     try {
+      // One failure must not abandon the products queued behind it.
       for (const prod of withIngs) {
         const label = prod.description || prod.item_number || prod.id;
-        const { ingredients } = await enrichENumbersForProduct(prod, (s) =>
-          setEStatus(`Looking up E-numbers — "${label}" (${s.message || s.phase})`)
-        );
-        await base44.entities.Product.update(prod.id, { fdc_ingredients: ingredients });
-        updated++;
+        try {
+          const { ingredients } = await enrichENumbersForProduct(prod, (s) =>
+            setEStatus(`Looking up E-numbers — "${label}" (${s.message || s.phase})`)
+          );
+          await base44.entities.Product.update(prod.id, { fdc_ingredients: ingredients });
+          updated++;
+        } catch (err) {
+          console.error("E-number lookup failed for", label, err);
+          failed.push(label);
+        }
       }
       await qc.invalidateQueries({ queryKey: ["products"] });
-      setEStatus(`Done — enriched ${updated} product(s). The FDC tables now show E-numbers.`);
-      setTimeout(() => setEStatus(""), 5000);
-    } catch (err) {
-      setEError(err?.message || "Failed to look up E-numbers with Gemini.");
-      setEStatus("");
+      if (failed.length > 0) {
+        setEError(
+          `Enriched ${updated} of ${withIngs.length}. Failed: ${failed.slice(0, 5).join(", ")}` +
+          `${failed.length > 5 ? ` and ${failed.length - 5} more` : ""}.`
+        );
+        setEStatus("");
+      } else {
+        setEStatus(`Done — enriched ${updated} product(s). The FDC tables now show E-numbers.`);
+        setTimeout(() => setEStatus(""), 5000);
+      }
     } finally {
       setEBusy(false);
     }

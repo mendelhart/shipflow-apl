@@ -11,7 +11,12 @@ export default defineConfig({
     alias: { '@': path.resolve(__dirname, './src') },
   },
   build: {
-    sourcemap: true,
+    // Sourcemaps ship the whole readable source tree to anyone who opens the
+    // site — 7 MB of it, with no error-tracking service here to consume them.
+    // 'hidden' still writes the .map files for local debugging but omits the
+    // //# sourceMappingURL comment, so browsers don't fetch them. Set
+    // VITE_SOURCEMAP=true if you ever need them served.
+    sourcemap: process.env.VITE_SOURCEMAP === 'true' ? true : 'hidden',
     rollupOptions: {
       output: {
         // Keep the heavy PDF/chart libraries out of the entry chunk so first

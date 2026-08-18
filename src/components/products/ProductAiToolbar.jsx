@@ -28,21 +28,36 @@ export default function ProductAiToolbar({ products, selectedIds = [], onDone })
     setError("");
     setStatus(`Looking up E-numbers for ${withIngs.length} product(s)…`);
     let updated = 0;
+    const failed = [];
     try {
+      // Each product is handled independently. Previously one failure — a
+      // rate limit, one malformed ingredient list — threw out of the loop and
+      // every remaining product was silently left unenriched, with the count
+      // of what HAD been saved discarded along with it.
       for (const prod of withIngs) {
         const label = prod.description || prod.item_number || prod.id;
-        const { ingredients } = await enrichENumbersForProduct(prod, (s) =>
-          setStatus(`Looking up E-numbers — "${label}" (${s.message || s.phase})`)
-        );
-        await base44.entities.Product.update(prod.id, { fdc_ingredients: ingredients });
-        updated++;
+        try {
+          const { ingredients } = await enrichENumbersForProduct(prod, (s) =>
+            setStatus(`Looking up E-numbers — "${label}" (${s.message || s.phase})`)
+          );
+          await base44.entities.Product.update(prod.id, { fdc_ingredients: ingredients });
+          updated++;
+        } catch (err) {
+          console.error("E-number lookup failed for", label, err);
+          failed.push(label);
+        }
       }
       onDone?.();
-      setStatus(`Done — enriched ${updated} product(s).`);
-      setTimeout(() => setStatus(""), 5000);
-    } catch (err) {
-      setError(err?.message || "Failed to look up E-numbers with Gemini.");
-      setStatus("");
+      if (failed.length > 0) {
+        setError(
+          `Enriched ${updated} of ${withIngs.length}. Failed: ${failed.slice(0, 5).join(", ")}` +
+          `${failed.length > 5 ? ` and ${failed.length - 5} more` : ""}.`
+        );
+        setStatus("");
+      } else {
+        setStatus(`Done — enriched ${updated} product(s).`);
+        setTimeout(() => setStatus(""), 5000);
+      }
     } finally {
       setBusy(false);
     }

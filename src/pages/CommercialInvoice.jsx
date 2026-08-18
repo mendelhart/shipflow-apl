@@ -3,7 +3,7 @@ import { base44 } from "@/api/base44Client";
 import { invokeLLM, uploadFile } from "@/lib/aiClient";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { format, parseISO } from "date-fns";
+import { format } from "date-fns";
 import {
   ArrowLeft,
   Upload,
@@ -28,6 +28,8 @@ import { Textarea } from "@/components/ui/textarea";
 import BrendamourInvoiceDoc from "@/components/documents/BrendamourInvoiceDoc";
 import InboundVerificationDoc from "@/components/documents/InboundVerificationDoc";
 import { parseWarehouseReport } from "@/utils/warehouseReportParser";
+import { friendlyErrorMessage } from "@/lib/errors";
+import { formatDate } from "@/lib/dates";
 
 const SELLER = "Dominion Liquid Technologies\n3965 Virginia Ave\nCincinnati, OH 45227\nUSA";
 const BUYER = "Capital Nutrition Inc.\n1020 Boul. Michèle-Bohec\nBlainville, QC J7C 5E2\nCanada";
@@ -45,19 +47,26 @@ export default function CommercialInvoice() {
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [error, setError] = useState("");
+  const [autoSaveError, setAutoSaveError] = useState("");
   const [parseStatus, setParseStatus] = useState("");
   const [invoiceData, setInvoiceData] = useState(null);
   const [currentShipmentId, setCurrentShipmentId] = useState(null);
   const [docType, setDocType] = useState("invoice");
   const [savedSearch, setSavedSearch] = useState("");
 
-  const { data: products = [] } = useQuery({
+  const {
+    data: products = [],
+    isLoading: productsLoading,
+    isError: productsFailed,
+    error: productsError,
+    refetch: refetchProducts,
+  } = useQuery({
     queryKey: ["products"],
     queryFn: () => base44.entities.Product.list(),
   });
 
   const { data: settings = [] } = useQuery({
-    queryKey: ["appSettings"],
+    queryKey: ["appsettings"],
     queryFn: () => base44.entities.AppSettings.list(),
   });
   const appSettings = settings?.[0] || {};
@@ -107,7 +116,7 @@ export default function CommercialInvoice() {
   const fromEntity = (s) => ({
     invoiceNumber: s.transaction_number || "",
     invoiceDate: s.ship_date
-      ? format(parseISO(s.ship_date), "MM/dd/yyyy")
+      ? formatDate(s.ship_date, "MM/dd/yyyy", format(new Date(), "MM/dd/yyyy"))
       : format(new Date(), "MM/dd/yyyy"),
     ship_date: s.ship_date || format(new Date(), "yyyy-MM-dd"),
     po: s.po_number || "",
@@ -370,13 +379,20 @@ Return ALL line items, even unmatched ones (use null for product_id).`,
       setInvoiceData(data);
       setDocType("invoice");
 
-      // Auto-save
+      // Auto-save. The UI promises "Every shipment is saved automatically", so
+      // a silent failure here is the worst kind: the user spends ten minutes
+      // correcting matched items and then navigates away, losing all of it.
       try {
         const created = await base44.entities.InboundShipment.create(toEntity(data));
         setCurrentShipmentId(created.id);
+        setAutoSaveError("");
         queryClient.invalidateQueries({ queryKey: ["inboundShipments"] });
       } catch (e) {
         console.error("Auto-save failed:", e);
+        setAutoSaveError(
+          friendlyErrorMessage(e, "This shipment could not be saved automatically.") +
+            " Use Save before leaving this page."
+        );
       }
     } catch (e) {
       setError(e.message || "Failed to parse the report. Please try again.");
@@ -665,6 +681,13 @@ Return ALL line items, even unmatched ones (use null for product_id).`,
                 </div>
               )}
 
+              {autoSaveError && (
+                <div className="flex items-center gap-2 mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-sm">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  {autoSaveError}
+                </div>
+              )}
+
               <div className="flex items-center gap-3 mt-4">
                 <Button
                   onClick={handleParseAndMatch}
@@ -681,8 +704,19 @@ Return ALL line items, even unmatched ones (use null for product_id).`,
                     </>
                   )}
                 </Button>
-                {products.length === 0 && (
+                {productsLoading && (
                   <span className="text-xs text-amber-600">Loading product catalog…</span>
+                )}
+                {productsFailed && (
+                  <span className="text-xs text-red-600">
+                    {friendlyErrorMessage(productsError, "Could not load the product catalog.")}{" "}
+                    <button onClick={() => refetchProducts()} className="underline">Retry</button>
+                  </span>
+                )}
+                {!productsLoading && !productsFailed && products.length === 0 && (
+                  <span className="text-xs text-amber-600">
+                    No products in the catalog yet — add products before matching.
+                  </span>
                 )}
               </div>
             </div>
@@ -722,7 +756,7 @@ Return ALL line items, even unmatched ones (use null for product_id).`,
                         </div>
                         <div className="text-xs text-gray-500 mt-0.5">
                           {s.transaction_number && `Txn: ${s.transaction_number} · `}
-                          {s.ship_date ? format(parseISO(s.ship_date), "MMM d, yyyy") : "No date"} ·{" "}
+                          {formatDate(s.ship_date, "MMM d, yyyy", "No date")} ·{" "}
                           {s.total_cases || 0} cases · ${(s.total_value || 0).toFixed(2)} {s.currency || "USD"}
                         </div>
                       </div>

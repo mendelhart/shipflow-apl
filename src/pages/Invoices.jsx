@@ -15,6 +15,8 @@ import { buildCommercialInvoicePdf } from "@/lib/emailDocs";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
 import { PDFDocument } from "pdf-lib";
 import JSZip from "jszip";
+import { friendlyErrorMessage } from "@/lib/errors";
+import { bumpStatus } from "@/domain/poStatus";
 
 function applyTemplate(template, vars) {
   return Object.entries(vars).reduce((s, [k, v]) => s.replaceAll(`{{${k}}}`, v ?? ""), template);
@@ -51,27 +53,8 @@ function base64ToUint8Array(base64) {
 
 // ---- error classification ---------------------------------------------------
 
-function isOutOfCredits(err) {
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  return err?.response?.status === 402 || msg.includes("credit") || msg.includes("payment required");
-}
 
-function friendlyErrorMessage(err, fallback) {
-  if (isOutOfCredits(err)) {
-    return "Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.";
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
 
-// Status auto-progresses forward only (draft < ready < booked < shipped <
-// invoiced) — never downgrades a PO that's already further along.
-const STATUS_ORDER = ["draft", "ready", "booked", "shipped", "invoiced"];
-function bumpStatus(current, target) {
-  const cur = STATUS_ORDER.indexOf(current || "draft");
-  const tgt = STATUS_ORDER.indexOf(target);
-  if (tgt === -1) return current || "draft";
-  return tgt > cur ? target : (current || "draft");
-}
 
 // ---- PDF compression + batching (mirrors TjxCanada.jsx) --------------------
 
@@ -172,7 +155,10 @@ function downloadBatchZipAndOpenMailDraft(batch) {
 // ---- .eml builder (real attachments, opens as a ready-to-send draft) ------
 
 function wrapBase64(base64) {
-  return base64.match(/.{1,76}/g).join("\r\n");
+  // String.match returns null (not []) when there is no match, so an empty
+  // attachment threw "Cannot read properties of null" mid-send rather than
+  // producing an empty part.
+  return (String(base64 || "").match(/.{1,76}/g) || []).join("\r\n");
 }
 
 function buildEmlBlob({ from, to, subject, body, files }) {

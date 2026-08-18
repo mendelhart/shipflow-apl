@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint . --quiet",
     "lint:fix": "eslint . --fix",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --import ./test/alias-loader.mjs --test test/*.test.mjs",
     "check": "npm run lint && npm test && npm run build"
   },
   "dependencies": {

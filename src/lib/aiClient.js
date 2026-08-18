@@ -1,28 +1,60 @@
-// Shared AI client — calls the Google Gemini API directly for document
-// parsing (Customer Documents, Commercial Invoice, TJX Canada). The Gemini
-// API key is stored locally in the browser (Settings → Gemini API).
+// Shared AI client.
 //
-// No Base44 AI credits are consumed. The API key is never logged and never
-// appears in any user-facing error message.
+// PREVIOUSLY: this called the Google Gemini API directly from the browser with
+// an API key kept in localStorage. That key was readable by any script on the
+// page and by anyone with access to the machine, it was per-user so it could
+// not be rotated centrally, and it was billed to the company with no per-user
+// limit. Meanwhile the `llm` Edge Function written to solve exactly this had
+// zero call sites.
+//
+// NOW: every request goes through the `llm` Edge Function, which holds the key
+// in server env, verifies the caller's session, and rate-limits per user.
+//
+// The exported API is unchanged, so the nine call sites did not move.
 
-const GEMINI_KEY = "b44_gemini_key_v1";
-const GEMINI_URL =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent";
-const MAX_PAYLOAD_BYTES = 15 * 1024 * 1024; // 15 MB base64 payload cap
-const REQUEST_TIMEOUT_MS = 120000; // 120 s per request
-const MIN_GAP_MS = 5000; // minimum 5-second gap between requests
-const BACKOFF_MS = [5000, 15000, 45000]; // exponential backoff for 429 / 503
+import { base44 } from "@/api/base44Client";
 
+const LEGACY_GEMINI_KEY = "b44_gemini_key_v1";
+const MIN_GAP_MS = 1500; // politeness gap; the server owns real rate limiting
+
+// One-time hygiene: purge any key this browser still holds from the old build.
+try {
+  if (localStorage.getItem(LEGACY_GEMINI_KEY)) {
+    localStorage.removeItem(LEGACY_GEMINI_KEY);
+    // eslint-disable-next-line no-console
+    console.info(
+      "[aiClient] Removed the locally stored Gemini key. AI requests now run " +
+        "server-side. If this key was ever in use, rotate it."
+    );
+  }
+} catch {
+  // localStorage can be unavailable (private mode, blocked cookies). Non-fatal.
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Retained for API compatibility with the Settings page.
+ * The key no longer lives in the browser, so these are inert.
+ */
 export function getGeminiKey() {
-  return localStorage.getItem(GEMINI_KEY) || "";
+  return "";
 }
 
-export function setGeminiKey(key) {
-  localStorage.setItem(GEMINI_KEY, key || "");
+export function setGeminiKey() {
+  // Intentionally a no-op. The key is an Edge Function secret:
+  //   supabase secrets set GEMINI_API_KEY=...
 }
 
+/**
+ * Whether AI features should be offered. The browser cannot see the server's
+ * key, so this is optimistic: if the key is missing the Edge Function returns
+ * a clear 503 and the error surfaces normally.
+ */
 export function isGeminiConfigured() {
-  return Boolean(getGeminiKey());
+  return true;
 }
 
 export function fileToDataUrl(file) {
@@ -34,50 +66,27 @@ export function fileToDataUrl(file) {
   });
 }
 
-// Drop-in replacement for base44.integrations.Core.UploadFile — returns a
-// base64 data URL (no credits used). The Gemini helper converts it to an
-// inlineData part.
+/**
+ * Real upload to Supabase Storage.
+ *
+ * This used to return a base64 data URL — a fake upload. Two consequences:
+ * the TJX invoice archive stored an empty `pdf_url` for every record (the only
+ * audit trail in the app held no documents), and whole PDFs sat in React state
+ * as base64 strings for the life of the session.
+ *
+ * Returns { file_url, storage_path, filename, size_bytes }; `file_url` is a
+ * signed https URL on the project's own storage host, which is the only thing
+ * the Edge Functions will fetch.
+ */
 export async function uploadFile({ file }) {
-  const file_url = await fileToDataUrl(file);
-  return { file_url, filename: file.name, size_bytes: file.size };
+  return base44.integrations.Core.UploadFile({ file });
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function formatBytes(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-// Pull the "error" field out of a non-2xx response body. Never includes the
-// API key — only the remote error text is surfaced.
-function parseErrorBody(text) {
-  if (!text) return "Unknown error";
-  try {
-    const data = JSON.parse(text);
-    return data?.error?.message || data?.error || data?.message || text.slice(0, 300);
-  } catch {
-    return text.slice(0, 300);
-  }
-}
-
-// Convert a base64 data URL into a Gemini inlineData part, stripping the
-// `data:<mime>;base64,` prefix so only the raw base64 payload is sent.
-function dataUrlToInlinePart(dataUrl) {
-  const match = dataUrl.match(/^data:([^;]+);base64,([\s\S]*)$/);
-  if (!match) {
-    throw new Error("Unsupported file format (expected a base64 data URL).");
-  }
-  return { inlineData: { mimeType: match[1], data: match[2] } };
-}
-
-// Serialization queue — parse requests are never fired in parallel and there
-// is a minimum 5-second gap between requests.
+// Serialisation queue — requests are not fired in parallel, with a short gap
+// between them. The Edge Function enforces the real per-user limit.
 let queueTail = Promise.resolve();
 let lastRequestTime = 0;
+
 function enqueue(task, onStatus) {
   const run = queueTail.then(async () => {
     const wait = MIN_GAP_MS - (Date.now() - lastRequestTime);
@@ -93,101 +102,47 @@ function enqueue(task, onStatus) {
   return run;
 }
 
-async function geminiRequest({ prompt, response_json_schema, file_urls, onStatus, filename }) {
-  const apiKey = getGeminiKey();
-  if (!apiKey) {
-    throw new Error("Gemini API key not configured. Open Settings → Gemini API to add it.");
-  }
+/**
+ * invokeLLM({ prompt, response_json_schema, file_urls, onStatus, filename })
+ *
+ * `file_urls` accepts what uploadFile returns (signed storage URLs). Retries
+ * and backoff are handled server-side; doing it here as well produced up to
+ * twelve upstream calls for one user action during a provider outage.
+ */
+export async function invokeLLM(params) {
+  const { prompt, response_json_schema, file_urls, onStatus } = params || {};
 
-  // Build parts: one inlineData part per file, then the text prompt.
   const files = Array.isArray(file_urls) ? file_urls : file_urls ? [file_urls] : [];
-  const parts = [];
-  let payloadSize = 0;
-  for (const f of files) {
-    if (typeof f !== "string") continue;
-    const part = dataUrlToInlinePart(f);
-    payloadSize += part.inlineData.data.length;
-    parts.push(part);
-  }
 
-  // File-size guard (requirement) — checked before any request is sent.
-  if (payloadSize > MAX_PAYLOAD_BYTES) {
+  // A data: URL here means something still calls the old fake uploadFile.
+  // Fail with a message that says what to fix rather than a server 400.
+  const inlineData = files.find((f) => typeof f === "string" && f.startsWith("data:"));
+  if (inlineData) {
     throw new Error(
-      `"${filename || "upload"}" is ${formatBytes(payloadSize)} — over the 15 MB limit. Reduce the file size and try again.`
+      "This document was not uploaded to storage. Re-upload it and try again."
     );
   }
-  parts.push({ text: prompt });
 
-  const body = {
-    contents: [{ role: "user", parts }],
-    generationConfig: {
-      maxOutputTokens: 8192,
-      responseMimeType: "application/json",
-      ...(response_json_schema ? { responseJsonSchema: response_json_schema } : {}),
-    },
-  };
+  return enqueue(async () => {
+    onStatus?.({ phase: "sending", message: "Analysing document…" });
+    const result = await base44.integrations.Core.InvokeLLM({
+      prompt,
+      response_json_schema,
+      file_urls: files,
+    });
+    onStatus?.({ phase: "done", message: "Done" });
 
-  let lastErr;
-  for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
-    if (attempt > 0) {
-      const delay = BACKOFF_MS[attempt - 1];
-      onStatus?.({ phase: "retrying", attempt, message: `Rate limited, retrying in ${delay / 1000}s…` });
-      await sleep(delay);
-    } else {
-      onStatus?.({ phase: "sending", message: "Contacting Gemini…" });
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    // The function returns parsed JSON when a schema was supplied, and raw
+    // text otherwise. Some prompts wrap JSON in a ``` fence.
+    if (typeof result !== "string") return result;
+    const cleaned = result
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim();
     try {
-      const res = await fetch(GEMINI_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey, // pinned header — never in URL/logs/errors
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      if (res.status === 429 || res.status === 503) {
-        lastErr = new Error(parseErrorBody(await res.text().catch(() => "")));
-        continue; // exponential backoff retry (max 3 attempts)
-      }
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(parseErrorBody(text));
-      }
-
-      const data = await res.json();
-      const textParts = (data?.candidates?.[0]?.content?.parts || [])
-        .map((p) => p?.text)
-        .filter(Boolean);
-      const joined = textParts.join("");
-      const cleaned = joined
-        .replace(/^```(?:json)?\s*/i, "")
-        .replace(/```\s*$/i, "")
-        .trim();
       return JSON.parse(cleaned);
-    } catch (err) {
-      clearTimeout(timer);
-      if (err.name === "AbortError") {
-        throw new Error("Gemini request timed out after 120 seconds.");
-      }
-      throw err; // network / other errors fail immediately — no retry
+    } catch {
+      return cleaned;
     }
-  }
-  throw lastErr || new Error("Gemini request failed after retries.");
-}
-
-// Single shared helper used by every parse path.
-export async function invokeLLM(params) {
-  const { onStatus, filename, prompt, response_json_schema, file_urls } = params;
-  const result = await enqueue(
-    () => geminiRequest({ prompt, response_json_schema, file_urls, onStatus, filename }),
-    onStatus
-  );
-  onStatus?.({ phase: "done", provider: "gemini" });
-  return result;
+  }, onStatus);
 }

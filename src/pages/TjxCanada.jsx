@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { PDFDocument } from 'pdf-lib';
 import JSZip from 'jszip';
+import { friendlyErrorMessage } from "@/lib/errors";
 
 // ============================================================================
 // Inlined former backend logic — runs client-side because backend functions
@@ -473,17 +474,7 @@ function downloadBatchEml(batch) {
   return emlName;
 }
 
-function isOutOfCredits(err) {
-  const msg = (err?.response?.data?.error || err?.message || '').toLowerCase();
-  return err?.response?.status === 402 || msg.includes('credit') || msg.includes('payment required');
-}
 
-function friendlyErrorMessage(err, fallback) {
-  if (isOutOfCredits(err)) {
-    return 'Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.';
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
 
 // ============================================================================
 // Component
@@ -519,9 +510,12 @@ export default function TjxCanada() {
   const subjectTemplate = settings.email_template_subject || 'Invoices - POs: {{po_numbers}}';
   const bodyTemplate = settings.email_template_body || 'Dear TJX Canada Accounts Payable,\n\nPlease find the following invoices attached:\n\n{{po_list}}\n\nThank you,\n{{company_name}}';
 
-  const { data: invoiceLogs = [] } = useQuery({
+  const { data: invoiceLogs = [], isError: invoiceLogsFailed } = useQuery({
     queryKey: ['tjxCanadaInvoiceLogs'],
-    queryFn: () => base44.entities.TjxCanadaInvoiceLog.list('-sent_at'),
+    // Append-only log, one row per invoice emailed. Unbounded, it becomes
+    // the slowest read in the app within a year. The UI only shows recent
+    // history; search should move server-side when this cap starts biting.
+    queryFn: () => base44.entities.TjxCanadaInvoiceLog.list('-sent_at', 500),
   });
 
   const filteredInvoiceLogs = invoiceLogs.filter(r => {
@@ -538,14 +532,20 @@ export default function TjxCanada() {
     }
   };
 
-  const addFiles = (newFiles) => {
-    const toAdd = Array.from(newFiles).filter(f => f.type === 'application/pdf');
-    setFiles(prev => {
-      const existingNames = new Set(prev.map(f => f.name));
-      const fresh = toAdd.filter(f => !existingNames.has(f.name));
-      fresh.forEach(f => processFile(f));
-      return [...prev, ...fresh];
-    });
+  const addFiles = (list) => {
+    const toAdd = Array.from(list || []).filter(f => f.type === "application/pdf");
+    if (toAdd.length === 0) return;
+
+    // `fresh` is computed OUTSIDE the state updater. React may invoke an
+    // updater more than once (eager evaluation, StrictMode), so calling
+    // processFile from inside it uploaded and billed every file twice, and the
+    // second pass then marked the row as a duplicate of itself.
+    const existingNames = new Set(files.map(f => f.name));
+    const fresh = toAdd.filter(f => !existingNames.has(f.name));
+    if (fresh.length === 0) return;
+
+    setFiles(prev => [...prev, ...fresh]);
+    fresh.forEach(f => processFile(f));
   };
 
   const onDrop = useCallback((e) => {
@@ -652,7 +652,17 @@ export default function TjxCanada() {
 
   const removeFile = (name) => {
     setFiles(prev => prev.filter(f => f.name !== name));
-    setFileStates(prev => { const s = { ...prev }; delete s[name]; return s; });
+    setFileStates(prev => {
+      const s = { ...prev };
+      // Each processed invoice holds an object URL for its split PDF. Dropping
+      // the state without revoking leaked the whole PDF for the life of the
+      // tab, and a long TJX session processes dozens of them.
+      if (s[name]?.downloadUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(s[name].downloadUrl);
+      }
+      delete s[name];
+      return s;
+    });
   };
 
   const pendingCount = files.filter(f => !f.isVirtual && fileStates[f.name]?.status === 'error').length;
@@ -693,7 +703,7 @@ export default function TjxCanada() {
         ...(invoiceFromEmail && { from_email: invoiceFromEmail }),
         ...(invoiceFromName && { from_name: invoiceFromName }),
       });
-      const { emails_sent = 1 } = resp.data || {};
+      const { emails_sent = 1 } = resp || {};
       setEmailDraft(null);
       setEmailResult({ to: emailDraft.to, batches: emails_sent, viaMailgun: true });
 
@@ -1095,7 +1105,12 @@ export default function TjxCanada() {
             />
           </div>
           <div className="flex-1 overflow-y-auto space-y-2 py-2">
-            {invoiceLogs.length === 0 && (
+            {invoiceLogsFailed && (
+              <p className="text-center text-red-600 py-8 text-sm">
+                The invoice history could not be loaded. It may not be empty — try reloading.
+              </p>
+            )}
+            {!invoiceLogsFailed && invoiceLogs.length === 0 && (
               <p className="text-center text-gray-400 py-8 text-sm">No invoices sent yet.</p>
             )}
             {invoiceLogs.length > 0 && filteredInvoiceLogs.length === 0 && (

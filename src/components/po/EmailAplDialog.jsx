@@ -34,6 +34,7 @@ export default function EmailAplDialog({ open, onClose, selectedPos, vendors = [
   const [status, setStatus] = useState(null); // null | "generating" | "sending" | "sent" | "error"
   const [progressLabel, setProgressLabel] = useState("");
   const [mailgunError, setMailgunError] = useState("");
+  const [partialWarning, setPartialWarning] = useState("");
   const [generatedFiles, setGeneratedFiles] = useState([]); // [{filename, url}] — url is a local blob URL
   const [mailgunBusy, setMailgunBusy] = useState(false);
   const [outlookBusy, setOutlookBusy] = useState(false);
@@ -59,6 +60,7 @@ export default function EmailAplDialog({ open, onClose, selectedPos, vendors = [
       setStatus(null);
       setProgressLabel("");
       setMailgunError("");
+      setPartialWarning("");
       setEditingTo(false);
       setEmailBatchQueue(null);
       setProcessedBatchIds(new Set());
@@ -146,24 +148,48 @@ export default function EmailAplDialog({ open, onClose, selectedPos, vendors = [
       setProgressLabel("Sending email…");
 
       const attachments = files.map(f => ({ base64: uint8ToBase64(f.bytes), filename: f.filename }));
-      await base44.functions.invoke("sendInvoiceEmail", {
+      // from_email/from_name are no longer sent: the Edge Function takes the
+      // sender from settings, so a caller cannot send mail as someone else.
+      const result = await base44.functions.invoke("sendInvoiceEmail", {
         to: emailTo,
         subject,
         body,
         attachments,
-        ...(aplFromEmail && { from_email: aplFromEmail }),
-        ...(aplFromName && { from_name: aplFromName }),
       });
 
+      // A partial multi-batch send: some emails reached APL, some did not.
+      // Retrying the whole thing would deliver the first batches twice.
+      if (result && result.success === false) {
+        setStatus("error");
+        setMailgunError(
+          result.error ||
+            `Sent ${result.emails_sent ?? 0} of ${result.total_batches ?? "?"} emails. Do not resend — check the APL mailbox first.`
+        );
+        setProgressLabel("");
+        return;
+      }
+
       const sentAt = new Date().toISOString();
-      await Promise.all(selectedPos.map(po => {
-        const newBooking = bookingNumber || po.apl_booking_number || "";
-        return base44.entities.PurchaseOrder.update(po.id, {
-          apl_booking_number: newBooking,
-          apl_email_sent_at: sentAt,
-          status: newBooking ? bumpStatus(po.status, "booked") : (po.status || "draft"),
-        });
-      }));
+
+      // The email is already gone. A failure updating PO bookkeeping must NOT
+      // be reported as "email failed" — that made people resend, and APL
+      // received the whole document set twice.
+      try {
+        await Promise.all(selectedPos.map(po => {
+          const newBooking = bookingNumber || po.apl_booking_number || "";
+          return base44.entities.PurchaseOrder.update(po.id, {
+            apl_booking_number: newBooking,
+            apl_email_sent_at: sentAt,
+            status: newBooking ? bumpStatus(po.status, "booked") : (po.status || "draft"),
+          });
+        }));
+      } catch (bookkeepingError) {
+        console.error("PO bookkeeping after APL send failed:", bookkeepingError);
+        setPartialWarning(
+          "The email was sent, but the purchase orders could not all be updated. " +
+            "Do not resend — set the booking number manually if it is missing."
+        );
+      }
 
       if (onSent) onSent({ bookingNumber, sentAt });
       setStatus("sent");
@@ -252,7 +278,7 @@ export default function EmailAplDialog({ open, onClose, selectedPos, vendors = [
 
   return (
     <>
-    <Dialog open={open} onOpenChange={handleClose}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !isBusy) handleClose(); }}>
       <DialogContent className="max-w-xl max-h-[90vh] flex flex-col overflow-hidden">
         <DialogHeader className="flex-shrink-0">
           <DialogTitle>Email Documents to APL Logistics</DialogTitle>
@@ -405,6 +431,14 @@ export default function EmailAplDialog({ open, onClose, selectedPos, vendors = [
                 <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-xs">
                   <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   {mailgunError}
+                </div>
+              )}
+
+              {/* Sent, but the follow-up bookkeeping did not all land */}
+              {partialWarning && (
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800 text-xs">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  {partialWarning}
                 </div>
               )}
             </div>

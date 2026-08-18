@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { base44 } from "@/api/base44Client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Star, ArrowLeft, Layers, ClipboardPaste } from "lucide-react";
+import { Plus, Pencil, Trash2, Star, ArrowLeft, Layers, ClipboardPaste, Search, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import BulkEditDialog from "@/components/products/BulkEditDialog";
 import FdcPasteDialog from "@/components/products/FdcPasteDialog";
+import { useProductSearch } from "@/hooks/useProductSearch";
 
 const EMPTY_VENDOR = { company_name: "", address_line1: "", address_line2: "", city: "", state_province: "", postal_code: "", country: "Canada", contact_name: "", phone: "", fax: "", email: "", vendor_ein: "", vendor_number: "", is_default: false };
 const EMPTY_PRODUCT = { item_number: "", vendor_style: "", description: "", upc_code: "", hs_code: "", country_of_origin: "USA", unit_price_cad: "", size: "750ml", units_per_carton: 6, carton_gross_weight_kg: "", carton_net_weight_kg: "", carton_cbm: "", is_food: true, ingredients: "", fdc_ingredients: [], fdc_consolidated_coo: "USA", fdc_product_of_animal_origin: "NO", shelf_life_days: "", storage_instructions: "" };
@@ -37,29 +38,40 @@ export default function Vendors() {
   // Vendor mutations
   const saveVendor = useMutation({
     mutationFn: (data) => editingVendor.id ? base44.entities.Vendor.update(editingVendor.id, data) : base44.entities.Vendor.create(data),
-    onSuccess: () => { qc.invalidateQueries(["vendors"]); setEditingVendor(null); }
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["vendors"] }); setEditingVendor(null); }
   });
   const delVendor = useMutation({
     mutationFn: (id) => base44.entities.Vendor.delete(id),
-    onSuccess: () => qc.invalidateQueries(["vendors"])
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] })
   });
 
   // Product mutations
   const saveProduct = useMutation({
     mutationFn: (data) => editingProduct.id ? base44.entities.Product.update(editingProduct.id, data) : base44.entities.Product.create(data),
-    onSuccess: () => { qc.invalidateQueries(["products"]); setEditingProduct(null); }
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["products"] }); setEditingProduct(null); }
   });
   const delProduct = useMutation({
     mutationFn: (id) => base44.entities.Product.delete(id),
-    onSuccess: () => { qc.invalidateQueries(["products"]); setDeleteTarget(null); }
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["products"] }); setDeleteTarget(null); }
   });
 
   const fv = (k) => (e) => setVendorForm(p => ({ ...p, [k]: e.target.value }));
   const fp = (k) => (e) => setProductForm(p => ({ ...p, [k]: e.target.value }));
-  const fpn = (k) => (e) => setProductForm(p => ({ ...p, [k]: parseFloat(e.target.value) || "" }));
+  // Keep the raw string while typing. `parseFloat(x) || ""` discarded a
+  // legitimate 0 (0 is falsy), so a zero price or weight silently became
+  // blank — and blank is now written to the database as null.
+  const fpn = (k) => (e) => setProductForm(p => ({ ...p, [k]: e.target.value }));
 
-  const allSelected = products.length > 0 && selectedIds.length === products.length;
-  const toggleAll = () => setSelectedIds(allSelected ? [] : products.map(p => p.id));
+  const {
+    search, setSearch, foodFilter, setFoodFilter,
+    sortField, sortDir, toggleSort, visible,
+  } = useProductSearch(products);
+
+  // Select-all applies to what is on screen, not to the whole catalog — with a
+  // filter active, "select all" silently selecting hidden rows is how a bulk
+  // edit ends up hitting products nobody was looking at.
+  const allSelected = visible.length > 0 && visible.every(p => selectedIds.includes(p.id));
+  const toggleAll = () => setSelectedIds(allSelected ? [] : visible.map(p => p.id));
   const toggleOne = (id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
 
   return (
@@ -108,14 +120,63 @@ export default function Vendors() {
 
         {/* Products */}
         <div>
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Product Catalog ({products.length})</h2>
+          <div className="flex flex-wrap items-center gap-3 mb-3">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+              Product Catalog ({visible.length === products.length
+                ? products.length
+                : `${visible.length} of ${products.length}`})
+            </h2>
+            <div className="relative flex-1 min-w-[220px] max-w-sm">
+              <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+              <Input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search item #, description, UPC, style…"
+                className="h-8 text-sm pl-7"
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              {[["all", "All"], ["food", "Food"], ["non_food", "Non-food"]].map(([v, label]) => (
+                <Button
+                  key={v}
+                  size="sm"
+                  variant={foodFilter === v ? "default" : "outline"}
+                  className="h-8 text-xs"
+                  onClick={() => setFoodFilter(v)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+          </div>
           <div className="bg-white rounded-xl border overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b">
                 <tr>
                   <th className="px-3 py-2 w-8"><Checkbox checked={allSelected} onCheckedChange={toggleAll} /></th>
-                  {["Item #", "Description", "UPC", "HS Code", "COO", "Price (CAD)", "Size", "Food", ""].map(h => (
-                    <th key={h} className="text-left px-3 py-2 font-medium text-gray-600 text-xs">{h}</th>
+                  {[
+                    ["Item #", "item_number"],
+                    ["Description", "description"],
+                    ["UPC", "upc_code"],
+                    ["HS Code", "hs_code"],
+                    ["COO", "country_of_origin"],
+                    ["Price (CAD)", "unit_price_cad"],
+                    ["Size", "size"],
+                    ["Food", null],
+                    ["", null],
+                  ].map(([h, field]) => (
+                    <th
+                      key={h}
+                      onClick={() => field && toggleSort(field)}
+                      className={`text-left px-3 py-2 font-medium text-gray-600 text-xs ${field ? "cursor-pointer select-none hover:text-gray-900" : ""}`}
+                    >
+                      <span className="inline-flex items-center gap-1">
+                        {h}
+                        {field && (sortField === field
+                          ? (sortDir === "asc" ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)
+                          : <ArrowUpDown className="w-3 h-3 text-gray-300" />)}
+                      </span>
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -123,7 +184,12 @@ export default function Vendors() {
                 {products.length === 0 && (
                   <tr><td colSpan={10} className="text-center py-10 text-gray-400">No products. Add items to your catalog.</td></tr>
                 )}
-                {products.map(p => (
+                {products.length > 0 && visible.length === 0 && (
+                  <tr><td colSpan={10} className="text-center py-10 text-gray-400">
+                    No products match “{search}”.
+                  </td></tr>
+                )}
+                {visible.map(p => (
                   <tr key={p.id} className={`hover:bg-gray-50 ${selectedIds.includes(p.id) ? "bg-blue-50" : ""}`}>
                     <td className="px-3 py-2"><Checkbox checked={selectedIds.includes(p.id)} onCheckedChange={() => toggleOne(p.id)} /></td>
                     <td className="px-3 py-2 font-mono text-xs">{p.item_number}</td>
@@ -274,7 +340,7 @@ export default function Vendors() {
         onClose={() => setBulkOpen(false)}
         products={products}
         selectedIds={selectedIds}
-        onSuccess={() => { qc.invalidateQueries(["products"]); setSelectedIds([]); }}
+        onSuccess={() => { qc.invalidateQueries({ queryKey: ["products"] }); setSelectedIds([]); }}
       />
 
       <FdcPasteDialog

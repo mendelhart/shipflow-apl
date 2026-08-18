@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { base44 } from "@/api/base44Client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Pencil, Trash2, ArrowLeft, FileText, Package, Tag, Box, Clipboard, FolderOpen, Mail, AlertCircle } from "lucide-react";
@@ -11,31 +11,12 @@ import EmailAplDialog from "@/components/po/EmailAplDialog";
 import EmailTjxEuropeDialog from "@/components/po/EmailTjxEuropeDialog";
 import { formatPoNumber } from "@/utils/poNumber";
 import { format } from "date-fns";
+import { friendlyErrorMessage } from "@/lib/errors";
+import { bumpStatus } from "@/domain/poStatus";
 
 // Same 402/403 classification used across the other pages (TjxCanada.jsx,
 // Invoices.jsx, CommercialInvoice.jsx, CustomerDocs.jsx, Settings.jsx).
-function friendlyErrorMessage(err, fallback) {
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  if (err?.response?.status === 402 || msg.includes("credit") || msg.includes("payment required")) {
-    return "Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.";
-  }
-  if (err?.response?.status === 403 || msg.includes("backend functions") || msg.includes("lacks") || msg.includes("capability")) {
-    return "This action needs backend functions, which aren't available on the current Base44 plan.";
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
 
-// Status auto-progresses forward only, never downgrades a PO that's already
-// further along (e.g. a booking # set after the PO is already "shipped"
-// shouldn't knock it back down to "booked"). "ready" is a manual pre-booking
-// state, kept in the hierarchy so it isn't skipped/overwritten unexpectedly.
-const STATUS_ORDER = ["draft", "ready", "booked", "shipped", "invoiced"];
-function bumpStatus(current, target) {
-  const cur = STATUS_ORDER.indexOf(current || "draft");
-  const tgt = STATUS_ORDER.indexOf(target);
-  if (tgt === -1) return current || "draft";
-  return tgt > cur ? target : (current || "draft");
-}
 
 const STATUS_COLORS = {
   draft: "bg-gray-100 text-gray-600",
@@ -52,6 +33,7 @@ export default function PurchaseOrders() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
+  const openedIdRef = useRef(null);
   const [editing, setEditing] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [selectedPoIds, setSelectedPoIds] = useState(new Set());
@@ -63,9 +45,12 @@ export default function PurchaseOrders() {
   const { data: vendors = [] } = useQuery({ queryKey: ["vendors"], queryFn: () => base44.entities.Vendor.list() });
 
   useEffect(() => {
-    if (selectedId && pos.length > 0) {
+    // Open the deep-linked PO ONCE. `pos` gets a new array identity on every
+    // refetch, so any invalidateQueries(["pos"]) elsewhere re-ran this and
+    // re-opened the editor the user had just closed.
+    if (selectedId && pos.length > 0 && openedIdRef.current !== selectedId) {
       const po = pos.find((p) => p.id === selectedId);
-      if (po) {setEditing(po);setShowForm(true);}
+      if (po) {openedIdRef.current = selectedId;setEditing(po);setShowForm(true);}
     }
   }, [selectedId, pos]);
 
@@ -176,20 +161,23 @@ export default function PurchaseOrders() {
     setBookingError("");
     try {
       const newStatus = val ? bumpStatus(po.status, "booked") : (po.status || "draft");
-      await base44.entities.PurchaseOrder.update(po.id, { apl_booking_number: val, status: newStatus });
-      // FIX: update() can resolve successfully (no thrown error) even when
-      // the field silently gets dropped server-side — this happens on
-      // Base44 (and similar no-code platforms) when the field isn't
-      // actually defined in the entity's schema yet. A successful promise
-      // is NOT proof the value persisted. Re-fetch and check the real
-      // stored value before declaring success, so a schema problem shows
-      // up as a clear error here instead of just "seeming" to not work.
-      await qc.invalidateQueries({ queryKey: ["pos"] });
-      const freshPos = qc.getQueryData(["pos"]) || [];
-      const freshPo = freshPos.find(p => p.id === po.id);
-      if ((freshPo?.apl_booking_number || "") !== val) {
+      // This check used to re-read the react-query CACHE after invalidating
+      // it, and report failure when the value didn't match. If the refetch
+      // itself failed (retry gives up), the cache still held pre-save data, so
+      // a write that succeeded was reported as "didn't actually save" and the
+      // user submitted it again.
+      //
+      // On Postgres there is no silent field-dropping to defend against:
+      // update() returns the stored row, and an unknown column is a thrown
+      // PGRST204. Trust the returned row.
+      const saved = await base44.entities.PurchaseOrder.update(po.id, {
+        apl_booking_number: val,
+        status: newStatus,
+      });
+      qc.invalidateQueries({ queryKey: ["pos"] });
+      if ((saved?.apl_booking_number || "") !== val) {
         setBookingError(
-          `Booking # didn't actually save for PO ${formatPoNumber(po)}. "apl_booking_number" is a real field, so this is likely a temporary save error — try again, and let me know if it keeps failing.`
+          `Booking # did not save for PO ${formatPoNumber(po)}. Please try again.`
         );
       } else {
         setBookingOverrides(prev => { const next = { ...prev }; delete next[po.id]; return next; });
@@ -220,7 +208,7 @@ export default function PurchaseOrders() {
   };
 
   if (showForm) {
-    return <POForm po={editing} onClose={() => {setShowForm(false);setEditing(null);navigate("/PurchaseOrders");}} />;
+    return <POForm po={editing} onClose={() => {openedIdRef.current = null;setShowForm(false);setEditing(null);navigate("/PurchaseOrders");}} />;
   }
 
   return (

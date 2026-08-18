@@ -12,6 +12,7 @@ import { PDFDocument } from "pdf-lib";
 import JSZip from "jszip";
 import { format } from "date-fns";
 import { formatPoNumber } from "@/utils/poNumber";
+import { STATUS_ORDER, bumpStatus } from "@/domain/poStatus";
 
 const PAGE = { w: 612, h: 792, margin: 36 }; // US Letter, points
 const CONTENT_W = PAGE.w - PAGE.margin * 2;
@@ -42,7 +43,6 @@ const TABLE_BASE_STYLES = {
 
 const SAFE_BATCH_BYTES = 23 * 1024 * 1024; // ~23MB per email, headroom under Gmail/Outlook's 25MB cap
 
-const STATUS_ORDER = ["draft", "ready", "booked", "shipped", "invoiced"];
 
 // ---- signature font (Alex Brush, a Google Font) -----------------------------
 const SIGNATURE_FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/alexbrush/AlexBrush-Regular.ttf";
@@ -637,28 +637,12 @@ export function uint8ToBase64(bytes) {
 
 // ---- error classification + status -----------------------------------------
 
-export function isOutOfCredits(err) {
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  return err?.response?.status === 402 || msg.includes("credit") || msg.includes("payment required");
-}
+// Re-exported from the single classifier so existing importers keep working.
+export { isOutOfCredits, friendlyErrorMessage } from '@/lib/errors';
+// Re-exported so existing importers of emailDocs keep working; the
+// definition lives in @/domain/poStatus.
+export { STATUS_ORDER, bumpStatus } from '@/domain/poStatus';
 
-export function friendlyErrorMessage(err, fallback) {
-  if (isOutOfCredits(err)) {
-    return "Base44 integration credits are exhausted for this billing cycle. Check Settings → Billing in Base44, or wait for the next reset.";
-  }
-  const msg = (err?.response?.data?.error || err?.message || "").toLowerCase();
-  if (err?.response?.status === 403 || msg.includes("backend functions") || msg.includes("lacks") || msg.includes("capability")) {
-    return "This action needs backend functions, which aren't available on the current Base44 plan.";
-  }
-  return err?.response?.data?.error || err?.message || fallback;
-}
-
-export function bumpStatus(current, target) {
-  const cur = STATUS_ORDER.indexOf(current || "draft");
-  const tgt = STATUS_ORDER.indexOf(target);
-  if (tgt === -1) return current || "draft";
-  return tgt > cur ? target : (current || "draft");
-}
 
 // ---- compression + batching -------------------------------------------------
 
@@ -750,7 +734,10 @@ export function downloadBatchZipAndOpenMailDraft(batch) {
 // ---- .eml builder (real attachments, opens as a ready-to-send draft) ------
 
 function wrapBase64(base64) {
-  return base64.match(/.{1,76}/g).join("\r\n");
+  // String.match returns null (not []) when there is no match, so an empty
+  // attachment threw "Cannot read properties of null" mid-send rather than
+  // producing an empty part.
+  return (String(base64 || "").match(/.{1,76}/g) || []).join("\r\n");
 }
 
 export function buildEmlBlob({ from, to, subject, body, files }) {
