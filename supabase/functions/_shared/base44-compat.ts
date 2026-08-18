@@ -314,12 +314,24 @@ export async function createClientFromRequest(req: Request) {
 
   return {
     auth: {
-      /** Throws 401 rather than returning null — callers already branch on it. */
+      /**
+       * Throws rather than returning null — callers already branch on it.
+       *
+       * The is_active check is the whole point of this function and was missing.
+       * RLS closed the data path, but these functions only ever required a valid
+       * JWT: while signup is open, anyone could register, be handed zero rows by
+       * RLS, and still POST to sendInvoiceEmail with their own recipients and
+       * attachments — mail leaving SPF/DKIM-signed by this domain — plus
+       * unmetered Gemini spend through the llm function.
+       */
       async me() {
         const { data: { user } } = await asUser.auth.getUser();
         if (!user) throw new HttpError('Unauthorized', 401);
         const { data: profile } = await asService
           .from('profiles').select('*').eq('id', user.id).maybeSingle();
+        if (!profile?.is_active) {
+          throw new HttpError('Your account is not active. Ask an administrator to enable it.', 403);
+        }
         return {
           ...profile,
           id: user.id,

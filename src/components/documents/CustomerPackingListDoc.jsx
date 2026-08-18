@@ -1,11 +1,15 @@
+import { customerTotals, customerLineTotals } from '@/domain/shipmentTotals';
 const nl2br = (str = "") => str.split("\n").map((line, i) => <span key={i}>{line}<br /></span>);
 
 export default function CustomerPackingListDoc({ data }) {
   const { customer, supplier, po, items = [], invoiceNumber, invoiceDate } = data;
 
   const totalUnits = items.reduce((s, i) => s + (parseFloat(i.qty) || 0), 0);
-  const totalGross = items.reduce((s, i) => s + (Math.max(parseFloat(i.gross_weight_kg) || 0, parseFloat(i.net_weight_kg) || 0)), 0);
-  const totalNet = items.reduce((s, i) => s + (Math.min(parseFloat(i.gross_weight_kg) || 0, parseFloat(i.net_weight_kg) || 0)), 0);
+  // Two defects here: the per-carton weight was printed as the line total, and
+  // min/max silently reordered gross and net so this document disagreed with the
+  // invoice in the same packet whenever the stored data had net above gross.
+  // Print what is stored; bad data should be visible, not smoothed over.
+  const { grossKg: totalGross, netKg: totalNet } = customerTotals(items);
 
   const cell = { border: "1px solid #000", padding: "3px 4px", fontSize: "8.5px" };
   const hcell = { ...cell, backgroundColor: "#f0f0f0", fontWeight: "bold", textAlign: "center" };
@@ -65,8 +69,8 @@ export default function CustomerPackingListDoc({ data }) {
               <td style={{ ...cell, wordBreak: "break-word" }}>{item.description}</td>
               <td style={{ ...cell, textAlign: "center" }}>{item.pack}</td>
               <td style={{ ...cell, textAlign: "center" }}>{item.qty}</td>
-              <td style={{ ...cell, textAlign: "right" }}>{(item.gross_weight_kg || item.net_weight_kg) ? Math.max(parseFloat(item.gross_weight_kg) || 0, parseFloat(item.net_weight_kg) || 0).toFixed(2) : ""}</td>
-              <td style={{ ...cell, textAlign: "right" }}>{(item.gross_weight_kg || item.net_weight_kg) ? Math.min(parseFloat(item.gross_weight_kg) || 0, parseFloat(item.net_weight_kg) || 0).toFixed(2) : ""}</td>
+              <td style={{ ...cell, textAlign: "right" }}>{item.gross_weight_kg ? customerLineTotals(item).grossKg.toFixed(2) : ""}</td>
+              <td style={{ ...cell, textAlign: "right" }}>{item.net_weight_kg ? customerLineTotals(item).netKg.toFixed(2) : ""}</td>
               <td style={{ ...cell, textAlign: "center" }}>{item.country_of_origin || ""}</td>
               <td style={{ ...cell, textAlign: "center" }}>{item.hs_code || ""}</td>
             </tr>

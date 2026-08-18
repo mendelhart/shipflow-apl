@@ -109,7 +109,7 @@ export default function CartonLabel({ po, item, boxNumber, totalBoxes }) {
         <div style={sectionStyle}><b>ITEM</b><br />{item.item_number}</div>
         <div style={sectionStyle}><b>STYLE</b><br />{item.vendor_style}</div>
         <div style={sectionStyle}><b>QTY</b><br />{item.units_per_carton}</div>
-        <div style={sectionStyle}><b>COO</b><br />USA</div>
+        <div style={sectionStyle}><b>COO</b><br />{item.country_of_origin || ""}</div>
         <div style={sectionStyle}><b>SIZE</b><br />{item.size}</div>
         <div style={sectionStyle}><b>TICKET</b><br />{po.pre_ticketed ? "Yes" : "No"}</div>
       </div>

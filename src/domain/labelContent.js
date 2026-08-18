@@ -23,7 +23,9 @@ export const labelCells = (po, item) => [
   ['ITEM', item?.item_number],
   ['STYLE', item?.vendor_style],
   ['QTY', item?.units_per_carton],
-  ['COO', item?.country_of_origin || 'USA'],
+  // Blank rather than a silent 'USA': the carton is a customs-facing document
+  // too, and buildCartonLabelsPdf refuses to print when this is empty.
+  ['COO', item?.country_of_origin || ''],
   ['SIZE', item?.size],
   ['TICKET', po?.pre_ticketed ? 'Yes' : 'No'],
 ];

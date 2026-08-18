@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, Package, Tag, Container, Clipboard, Users, ChevronRight, AlertCircle, Settings, FolderOpen, ShieldCheck } from "lucide-react";
-import { useAuth } from "@/lib/AuthContext";
+import { FileText, Package, Tag, Container, Clipboard, Users, ChevronRight, AlertCircle, Settings, FolderOpen } from "lucide-react";
 import { base44 } from "@/api/base44Client";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
@@ -20,7 +19,6 @@ const docCards = [
 
 
 export default function Dashboard() {
-  const { user: currentUser } = useAuth();
   // Distinct key: this fetches 50 rows while six other pages fetch all of them
   // under the same ["pos"] key. Visiting the Dashboard first primed the shared
   // cache with 50, so Purchase Orders then showed 50 of 300 with no loading
@@ -54,13 +52,6 @@ export default function Dashboard() {
           <Link to="/Vendors" className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 border rounded-lg px-3 py-2">
             <Users className="w-4 h-4" /> Vendors & Products
           </Link>
-          {/* Admin-only: activating a new colleague used to require the
-              Supabase dashboard. */}
-          {currentUser?.role === "admin" && (
-            <Link to="/Users" className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 border rounded-lg px-3 py-2">
-              <ShieldCheck className="w-4 h-4" /> Users
-            </Link>
-          )}
           <Link to="/Settings" className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 border rounded-lg px-3 py-2">
             <Settings className="w-4 h-4" /> Settings
           </Link>

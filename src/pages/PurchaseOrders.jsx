@@ -13,6 +13,7 @@ import { formatPoNumber } from "@/utils/poNumber";
 import { format } from "date-fns";
 import { friendlyErrorMessage } from "@/lib/errors";
 import { bumpStatus } from "@/domain/poStatus";
+import { shipmentTotals } from '@/domain/shipmentTotals';
 
 // Same 402/403 classification used across the other pages (TjxCanada.jsx,
 // Invoices.jsx, CommercialInvoice.jsx, CustomerDocs.jsx, Settings.jsx).
@@ -67,9 +68,15 @@ export default function PurchaseOrders() {
       const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
       const productByItemNumber = Object.fromEntries(products.filter((p) => p.item_number).map((p) => [p.item_number, p]));
 
-      for (const po of pos) {
-        if (!po.items?.length) continue;
+      for (const stalePo of pos) {
+        if (!stalePo.items?.length) continue;
         try {
+          // Re-read immediately before writing. This used to rebuild the whole
+          // `items` array from react-query's cache, which can be hours old, and
+          // write it back wholesale — silently erasing line items a colleague
+          // had added in the meantime, with no error anywhere.
+          const [po] = await base44.entities.PurchaseOrder.filter({ id: stalePo.id });
+          if (!po?.items?.length) continue;
           const updatedItems = po.items.map((item) => {
             const prod = (item.product_id ? productMap[item.product_id] : null) || (item.item_number ? productByItemNumber[item.item_number] : null);
             if (!prod) return item;
@@ -80,9 +87,7 @@ export default function PurchaseOrders() {
               net_weight_kg: prod?.carton_net_weight_kg ?? item.net_weight_kg
             };
           });
-          const totalCbm = updatedItems.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0) * (parseFloat(i.cbm) || 0), 0);
-          const totalGross = updatedItems.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0) * (parseFloat(i.gross_weight_kg) || 0), 0);
-          const totalNet = updatedItems.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0) * (parseFloat(i.net_weight_kg) || 0), 0);
+          const { cbm: totalCbm, grossKg: totalGross, netKg: totalNet } = shipmentTotals(updatedItems);
           await base44.entities.PurchaseOrder.update(po.id, {
             items: updatedItems,
             total_cbm: parseFloat(totalCbm.toFixed(6)),

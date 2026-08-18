@@ -32,9 +32,18 @@ async function sendEmail({ apiKey, domain, from, to, bcc, subject, body, htmlBod
     headers: { 'Authorization': 'Basic ' + btoa(`api:${apiKey}`) },
     body: formData,
   });
-  const result = await resp.json();
-  if (!resp.ok) throw new Error(result.message || 'Mailgun rejected the request');
-  return result.id;
+  // Mailgun answers auth and domain errors with text/plain, not JSON. Parsing
+  // unconditionally turned the most likely first-run failure — a wrong API key —
+  // into "Unexpected token 'F', \"Forbidden\" is not valid JSON", which sends
+  // whoever reads it looking in entirely the wrong place.
+  const raw = await resp.text();
+  let result: Record<string, unknown> = {};
+  try { result = JSON.parse(raw); } catch { /* non-JSON error body */ }
+  if (!resp.ok) {
+    const detail = (result.message as string) || raw.slice(0, 200) || resp.statusText;
+    throw new Error(`Mailgun rejected the request (${resp.status}): ${detail}`);
+  }
+  return result.id as string;
 }
 
 serve(async (req) => {
@@ -141,6 +150,12 @@ serve(async (req) => {
       }
     }
     if (current.length > 0) batches.push(current);
+    // A request with no attachments produced an empty batch list, so the send
+    // loop never ran and the function returned {success:true, emails_sent:0}.
+    // The Settings page's "send a test email" button posts exactly that shape,
+    // which meant the one check anyone would run to prove email works was
+    // guaranteed to report success without sending anything.
+    if (batches.length === 0) batches.push([]);
 
     console.log(`Sending ${batches.length} email(s) for ${fetched.length} attachment(s)`);
 

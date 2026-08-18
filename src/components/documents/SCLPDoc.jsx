@@ -82,9 +82,12 @@ export default function SCLPDoc({
   // Aggregate totals
   const totalCartons = rows.reduce((s, r) => s + (parseInt(r.item.num_cartons) || 0), 0);
   const totalUnits   = rows.reduce((s, r) => s + (parseFloat(r.item.total_units) || 0), 0);
+  // A container load plan is checked against container and axle weight limits,
+  // so it needs GROSS. This summed net into a variable named totalGross,
+  // understating the load by the packaging weight on every line.
   const totalGross   = rows.reduce((s, r) => {
     const c = parseInt(r.item.num_cartons) || 0;
-    return s + c * (parseFloat(r.item.net_weight_kg) || 0);
+    return s + c * (parseFloat(r.item.gross_weight_kg) || 0);
   }, 0);
   const totalCbm     = rows.reduce((s, r) => {
     const c = parseInt(r.item.num_cartons) || 0;
@@ -218,14 +221,14 @@ export default function SCLPDoc({
             {th("Cartons", { textAlign: "center" })}
             {th("Units", { textAlign: "center" })}
             {th("CBM", { textAlign: "center" })}
-            {th("Weight (kg)", { textAlign: "center" })}
+            {th("Gross Weight (kg)", { textAlign: "center" })}
           </tr>
         </thead>
         <tbody>
           {rows.map(({ po, item, key }) => {
             const cartons = parseInt(item.num_cartons) || 0;
             const cbm     = cartons * (parseFloat(item.cbm) || 0);
-            const weight  = cartons * (parseFloat(item.net_weight_kg) || 0);
+            const weight  = cartons * (parseFloat(item.gross_weight_kg) || 0);
             return (
               <tr key={key}>
                 {cell(formatPoNumber(po))}

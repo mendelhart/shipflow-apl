@@ -1,3 +1,4 @@
+import { customerTotals, customerLineTotals } from '@/domain/shipmentTotals';
 const nl2br = (str = "") => str.split("\n").map((line, i) => <span key={i}>{line}<br /></span>);
 
 export default function CustomerInvoiceDoc({ data }) {
@@ -5,8 +6,9 @@ export default function CustomerInvoiceDoc({ data }) {
 
   const totalUnits = items.reduce((s, i) => s + (parseFloat(i.qty) || 0), 0);
   const totalValue = items.reduce((s, i) => s + (parseFloat(i.total_amount) || 0), 0);
-  const totalGross = items.reduce((s, i) => s + (parseFloat(i.gross_weight_kg) || 0), 0);
-  const totalNet = items.reduce((s, i) => s + (parseFloat(i.net_weight_kg) || 0), 0);
+  // These weights are PER CARTON and `qty` is the carton count, so summing them
+  // raw declared a 100-case line as weighing one carton.
+  const { grossKg: totalGross, netKg: totalNet } = customerTotals(items);
 
   const cell = { border: "1px solid #000", padding: "3px 4px", fontSize: "8.5px" };
   const hcell = { ...cell, backgroundColor: "#f0f0f0", fontWeight: "bold", textAlign: "center" };
@@ -72,8 +74,8 @@ export default function CustomerInvoiceDoc({ data }) {
               <td style={{ ...cell, textAlign: "center" }}>{item.pack}</td>
               <td style={{ ...cell, textAlign: "right" }}>{parseFloat(item.unit_price || 0).toFixed(2)}</td>
               <td style={{ ...cell, textAlign: "right" }}>{parseFloat(item.total_amount || 0).toFixed(2)}</td>
-              <td style={{ ...cell, textAlign: "right" }}>{item.gross_weight_kg ? parseFloat(item.gross_weight_kg).toFixed(2) : ""}</td>
-              <td style={{ ...cell, textAlign: "right" }}>{item.net_weight_kg ? parseFloat(item.net_weight_kg).toFixed(2) : ""}</td>
+              <td style={{ ...cell, textAlign: "right" }}>{item.gross_weight_kg ? customerLineTotals(item).grossKg.toFixed(2) : ""}</td>
+              <td style={{ ...cell, textAlign: "right" }}>{item.net_weight_kg ? customerLineTotals(item).netKg.toFixed(2) : ""}</td>
               <td style={{ ...cell, textAlign: "center" }}>{item.country_of_origin || ""}</td>
             </tr>
           ))}

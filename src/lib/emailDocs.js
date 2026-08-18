@@ -13,8 +13,6 @@ import JSZip from "jszip";
 import { format } from "date-fns";
 import { formatPoNumber } from "@/utils/poNumber";
 import { STATUS_ORDER, bumpStatus } from "@/domain/poStatus";
-import { HEADER_IMG, FOOTER_IMG, HEADER_FALLBACK, FOOTER_FALLBACK, loadBrandImage } from "@/domain/brandAssets";
-import { encodeHeader, encodeAddressHeader, encodeTextBody } from "@/lib/mimeHeaders";
 
 const PAGE = { w: 612, h: 792, margin: 36 }; // US Letter, points
 const CONTENT_W = PAGE.w - PAGE.margin * 2;
@@ -32,8 +30,8 @@ const INVOICE_ADDRESSES = {
 
 const FDC_DEST = { "50": "United Kingdom", "55": "Germany" };
 
-// Served from our own /public now — see @/domain/brandAssets. These used to be
-// hot-linked from the platform this app was migrated off.
+const HEADER_IMG_URL = "https://media.base44.com/images/public/69b77fe17f63d9da1603f490/4586c1ce5_HeaderTJX.png";
+const FOOTER_IMG_URL = "https://media.base44.com/images/public/69b77fe17f63d9da1603f490/16f51c542_FooterTJX1.png";
 
 const TABLE_BASE_STYLES = {
   styles: { fontSize: 8, cellPadding: 3, lineColor: [0, 0, 0], lineWidth: 0.5, textColor: [0, 0, 0], valign: "middle" },
@@ -555,7 +553,7 @@ export async function buildRepeatFdcPdf({ po, vendor }) {
   let y = PAGE.margin;
 
   try {
-    const dataUrl = await loadBrandImage(HEADER_IMG, HEADER_FALLBACK);
+    const dataUrl = await fetchImageDataUrl(HEADER_IMG_URL);
     const props = pdf.getImageProperties(dataUrl);
     const imgH = (props.height / props.width) * CONTENT_W;
     pdf.addImage(dataUrl, PAGE.margin, y, CONTENT_W, imgH);
@@ -627,7 +625,7 @@ export async function buildRepeatFdcPdf({ po, vendor }) {
   y += 20;
 
   try {
-    const dataUrl = await loadBrandImage(FOOTER_IMG, FOOTER_FALLBACK);
+    const dataUrl = await fetchImageDataUrl(FOOTER_IMG_URL);
     const props = pdf.getImageProperties(dataUrl);
     const imgH = (props.height / props.width) * CONTENT_W;
     if (y + imgH > PAGE.h - PAGE.margin) pdf.addPage();
@@ -757,19 +755,19 @@ function wrapBase64(base64) {
 
 export function buildEmlBlob({ from, to, subject, body, files }) {
   const boundary = `----shipping-docs-${Date.now().toString(36)}`;
-  const { encoding: bodyEncoding, body: crlfBody } = encodeTextBody(body);
+  const crlfBody = body.replace(/\n/g, "\r\n");
 
   let eml = "";
-  eml += `From: ${encodeAddressHeader(from)}\r\n`;
-  eml += `To: ${encodeAddressHeader(to)}\r\n`;
-  eml += `Subject: ${encodeHeader(subject)}\r\n`;
+  eml += `From: ${from}\r\n`;
+  eml += `To: ${to}\r\n`;
+  eml += `Subject: ${subject}\r\n`;
   eml += `X-Unsent: 1\r\n`;
   eml += `MIME-Version: 1.0\r\n`;
   eml += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n`;
   eml += `\r\n`;
   eml += `--${boundary}\r\n`;
   eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: ${bodyEncoding}\r\n`;
+  eml += `Content-Transfer-Encoding: 7bit\r\n`;
   eml += `\r\n`;
   eml += `${crlfBody}\r\n`;
   eml += `\r\n`;

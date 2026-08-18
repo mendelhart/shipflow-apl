@@ -141,9 +141,14 @@ begin
     'app_settings','vendor','product','purchase_order',
     'customer_invoice','inbound_shipment','sclp','tjx_canada_invoice_log'
   ] loop
+    -- _update was created below but never dropped here, so a second run of
+    -- this migration hit "policy already exists". Everything is in one
+    -- transaction, so that did not just skip a statement -- it rolled the
+    -- WHOLE migration back, while the file documents itself as idempotent.
     execute format('drop policy if exists %I on %I', t || '_rw', t);
     execute format('drop policy if exists %I on %I', t || '_read', t);
     execute format('drop policy if exists %I on %I', t || '_write', t);
+    execute format('drop policy if exists %I on %I', t || '_update', t);
     execute format('drop policy if exists %I on %I', t || '_delete', t);
 
     execute format(

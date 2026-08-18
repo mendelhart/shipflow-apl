@@ -152,7 +152,17 @@ function drawLabel(doc, { po, item, boxNumber, totalBoxes }) {
 
   /* ---- Description ---- */
   doc.setFont(FONT, 'bold').setFontSize(pt(14));
-  const descLines = doc.splitTextToSize(String(item?.description ?? ''), w - INNER * 2 - BORDER * 2);
+  // Capped at 4 lines. An unbounded description consumed the space the barcode
+  // needs: at ~330 characters the symbol dropped below the GS1 minimum, and at
+  // ~490 the barcode box failed its size guard and the whole run printed with
+  // no barcode at all, reported as success. The barcode is the point of the
+  // label; the description is not allowed to crowd it out.
+  const MAX_DESC_LINES = 4;
+  const allDescLines = doc.splitTextToSize(String(item?.description ?? ''), w - INNER * 2 - BORDER * 2);
+  const descLines = allDescLines.slice(0, MAX_DESC_LINES);
+  if (allDescLines.length > MAX_DESC_LINES) {
+    descLines[MAX_DESC_LINES - 1] = `${String(descLines[MAX_DESC_LINES - 1]).replace(/\s+\S*$/, '')}…`;
+  }
   const descLH = pt(14) * 1.2;
   const descH = descLines.length * descLH + INNER * 2;
   box(doc, x, y, w, descH);
@@ -182,6 +192,16 @@ function drawLabel(doc, { po, item, boxNumber, totalBoxes }) {
       // page while a long one squashed them. Scanners read the ratio, and print
       // shops reject out-of-spec symbols.
       const geo = barcodeGeometry({ availW, availH, bars: bars.length });
+      if (!geo.inSpec) {
+        // inSpec was computed, exported and documented, and never once checked
+        // at the only call site. availH is whatever the description left over,
+        // so a long description silently drove real print runs below 0.8x.
+        throw new Error(
+          `The description on ${item?.item_number || 'an item'} is too long to fit a ` +
+          `scannable barcode on a 4x6 label (magnification would be ${geo.mag.toFixed(2)}x, ` +
+          `below the 0.80x minimum). Shorten it in Products and print again.`
+        );
+      }
       const { moduleW, barH } = geo;
       const barsW = bars.length * moduleW;
       const bx = x + (w - barsW) / 2;
@@ -227,8 +247,52 @@ export async function buildCartonLabelsPdf({ po, startBox = 1, onProgress }) {
     throw new Error('This purchase order has no cartons to label.');
   }
 
+  // Pre-flight. Every one of these used to print thousands of unusable labels
+  // and report success: a missing UPC drew an empty framed box; a wrong check
+  // digit printed red English error text onto the carton while silently
+  // correcting the bars, so the label disagreed with the product master; and a
+  // long description squeezed the symbol below the 0.8x GS1 floor, or out of
+  // existence entirely, with no warning. Fail before page one instead.
+  const missingUpc = [];
+  const badCheckDigit = [];
+  const missingCoo = [];
+  for (const { item } of plan) {
+    if (!String(item?.country_of_origin || '').trim()) {
+      missingCoo.push(item?.item_number || item?.description || 'an item');
+    }
+    const upc = normalizeUpc(item?.upc_code);
+    const label = item?.item_number || item?.description || 'an item';
+    if (upc.isEmpty) missingUpc.push(label);
+    else if (upc.checkMismatch) badCheckDigit.push(`${label} (${item.upc_code})`);
+  }
+  if (missingCoo.length) {
+    throw new Error(
+      `Country of origin is blank on ${missingCoo.join(', ')}. It used to default ` +
+      `to USA on the carton, which is a false origin claim on a customs-facing label.`
+    );
+  }
+  if (missingUpc.length) {
+    throw new Error(
+      `No UPC on ${missingUpc.join(', ')}. Add it in Products before printing — ` +
+      `labels would otherwise print with a blank barcode box.`
+    );
+  }
+  if (badCheckDigit.length) {
+    throw new Error(
+      `The UPC check digit is wrong on ${badCheckDigit.join(', ')}. Correct the ` +
+      `product record before printing — the barcode would scan as a different code ` +
+      `than the one stored.`
+    );
+  }
+
   let printed = 0;
   let first = true;
+  // Box numbers run across the WHOLE purchase order, not per line item.
+  // Previously `boxNumber` restarted at `startBox` for every item and
+  // `totalBoxes` was that item's carton count, so a 2-item PO produced
+  // "1 of 3, 2 of 3, 3 of 3, 1 of 2, 2 of 2" — two physically different cartons
+  // both labelled Box 1, and no label stating the real shipment total.
+  let boxNumber = startBox;
   for (const { item, cartons } of plan) {
     for (let i = 0; i < cartons; i += 1) {
       if (!first) doc.addPage([PAGE_W, PAGE_H], 'portrait');
@@ -236,9 +300,10 @@ export async function buildCartonLabelsPdf({ po, startBox = 1, onProgress }) {
       drawLabel(doc, {
         po,
         item,
-        boxNumber: i + startBox,
-        totalBoxes: cartons,
+        boxNumber,
+        totalBoxes: startBox - 1 + total,
       });
+      boxNumber += 1;
       printed += 1;
       if (onProgress && printed % 50 === 0) {
         onProgress(printed, total);

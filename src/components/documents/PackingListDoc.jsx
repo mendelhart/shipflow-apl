@@ -1,4 +1,5 @@
 import { format } from "date-fns";
+import { shipmentTotals, lineTotals } from '@/domain/shipmentTotals';
 import { formatPoNumber } from "@/utils/poNumber";
  
 const ADDRESSES = {
@@ -19,9 +20,10 @@ export default function PackingListDoc({ po, vendor }) {
   const items = po.items || [];
   const totalCartons = items.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0), 0);
   const totalUnits = items.reduce((s, i) => s + (parseFloat(i.total_units) || 0), 0);
-  const totalGross = items.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0) * (parseFloat(i.net_weight_kg) || 0), 0);
-  const totalNet = items.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0) * (parseFloat(i.gross_weight_kg) || 0), 0);
-  const totalCbm = items.reduce((s, i) => s + (parseFloat(i.num_cartons) || 0) * (parseFloat(i.cbm) || 0), 0);
+  // Gross and net were transposed here: the Gross column was fed net weight
+  // and vice versa, so this document contradicted the commercial invoice in the
+  // same packet. Both now come from one shared calculation.
+  const { grossKg: totalGross, netKg: totalNet, cbm: totalCbm } = shipmentTotals(items);
  
   const vendorAddr = [vendor.company_name, vendor.address_line1, vendor.address_line2, vendor.city && `${vendor.city}${vendor.state_province ? ", " + vendor.state_province : ""}`, vendor.postal_code, vendor.country].filter(Boolean).join("\n");
  
@@ -79,9 +81,9 @@ export default function PackingListDoc({ po, vendor }) {
               <td style={{ border: "1px solid #000", padding: "4px", textAlign: "center" }}>{item.units_per_carton}</td>
               <td style={{ border: "1px solid #000", padding: "4px", textAlign: "center" }}>{item.num_cartons}</td>
               <td style={{ border: "1px solid #000", padding: "4px", textAlign: "center" }}>{item.total_units}</td>
-              <td style={{ border: "1px solid #000", padding: "4px", textAlign: "right" }}>{((parseFloat(item.num_cartons)||0)*(parseFloat(item.net_weight_kg)||0)).toFixed(2)}</td>
-              <td style={{ border: "1px solid #000", padding: "4px", textAlign: "right" }}>{((parseFloat(item.num_cartons)||0)*(parseFloat(item.gross_weight_kg)||0)).toFixed(2)}</td>
-              <td style={{ border: "1px solid #000", padding: "4px", textAlign: "right" }}>{((parseFloat(item.num_cartons)||0)*(parseFloat(item.cbm)||0)).toFixed(6)}</td>
+              <td style={{ border: "1px solid #000", padding: "4px", textAlign: "right" }}>{lineTotals(item).grossKg.toFixed(2)}</td>
+              <td style={{ border: "1px solid #000", padding: "4px", textAlign: "right" }}>{lineTotals(item).netKg.toFixed(2)}</td>
+              <td style={{ border: "1px solid #000", padding: "4px", textAlign: "right" }}>{lineTotals(item).cbm.toFixed(6)}</td>
             </tr>
           ))}
           <tr style={{ fontWeight: "bold", backgroundColor: "#f9f9f9" }}>

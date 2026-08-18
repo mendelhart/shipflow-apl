@@ -81,6 +81,7 @@ export default function SCLP() {
   // because the form has unsaved edits.
   const [pendingMatch, setPendingMatch] = useState(null);
   const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | error
+  const [saveError, setSaveError] = useState("");
   const [savedRecordsOpen, setSavedRecordsOpen] = useState(false);
 
   const { data: pos = [] } = useQuery({
@@ -275,10 +276,16 @@ export default function SCLP() {
         console.error("Failed to update PO status to shipped:", statusErr);
       }
 
+      setSaveError("");
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 3000);
     } catch (err) {
+      // A red button for four seconds was the entire feedback. The most likely
+      // failure here is a duplicate booking number (the unique index added in
+      // migration 002), which is unrecoverable unless you are told what it is —
+      // the SCLP simply never saved.
       console.error("Failed to save SCLP:", err);
+      setSaveError(friendlyErrorMessage(err, "Could not save this SCLP."));
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 4000);
     }
@@ -427,6 +434,12 @@ export default function SCLP() {
               {saveStatus === "saved" ? <CheckCircle className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
               {saveLabel}
             </Button>
+          )}
+
+          {saveError && (
+            <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 max-w-md">
+              {saveError}
+            </div>
           )}
 
           {selectedPOObjects.length > 0 && (

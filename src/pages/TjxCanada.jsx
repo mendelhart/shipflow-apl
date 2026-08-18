@@ -12,7 +12,6 @@ import { Label } from '@/components/ui/label';
 import { PDFDocument } from 'pdf-lib';
 import JSZip from 'jszip';
 import { friendlyErrorMessage } from "@/lib/errors";
-import { encodeHeader, encodeAddressHeader, encodeTextBody } from "@/lib/mimeHeaders";
 
 // ============================================================================
 // Inlined former backend logic — runs client-side because backend functions
@@ -463,12 +462,12 @@ function wrapBase64(base64) {
 
 function buildEmlBlob({ from, to, subject, body, files }) {
   const boundary = `----invoice-${Date.now().toString(36)}`;
-  const { encoding: bodyEncoding, body: crlfBody } = encodeTextBody(body);
+  const crlfBody = body.replace(/\n/g, '\r\n');
 
   let eml = '';
-  eml += `From: ${encodeAddressHeader(from)}\r\n`;
-  eml += `To: ${encodeAddressHeader(to)}\r\n`;
-  eml += `Subject: ${encodeHeader(subject)}\r\n`;
+  eml += `From: ${from}\r\n`;
+  eml += `To: ${to}\r\n`;
+  eml += `Subject: ${subject}\r\n`;
   // Tells (Windows desktop) Outlook to open this .eml as an editable,
   // unsent draft with a visible Send button — without this, double-clicking
   // a .eml normally opens it read-only, styled like a message you received,
@@ -479,7 +478,7 @@ function buildEmlBlob({ from, to, subject, body, files }) {
   eml += `\r\n`;
   eml += `--${boundary}\r\n`;
   eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: ${bodyEncoding}\r\n`;
+  eml += `Content-Transfer-Encoding: 7bit\r\n`;
   eml += `\r\n`;
   eml += `${crlfBody}\r\n`;
   eml += `\r\n`;
@@ -1197,23 +1196,9 @@ export default function TjxCanada() {
                   <p className="text-xs text-gray-500 truncate">{r.filename} · to {r.sent_to} · {r.sent_at ? new Date(r.sent_at).toLocaleString() : ''}</p>
                 </div>
                 {r.pdf_url && (
-                  /* Re-signed on click. The stored URL is a 7-day signed link;
-                     following it directly returned an error on day 8, which
-                     read as the file having been deleted. */
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        const fresh = await base44.integrations.Core.ResolveFileUrl(r.pdf_url);
-                        window.open(fresh, '_blank', 'noopener,noreferrer');
-                      } catch (err) {
-                        alert(friendlyErrorMessage(err, 'Could not open that file.'));
-                      }
-                    }}
-                    className="text-xs text-blue-600 hover:underline flex-shrink-0"
-                  >
+                  <a href={r.pdf_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex-shrink-0">
                     Open ↗
-                  </button>
+                  </a>
                 )}
               </div>
             ))}

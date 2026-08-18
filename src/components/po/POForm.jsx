@@ -13,12 +13,17 @@ import { Switch } from "@/components/ui/switch";
 import { useNavigate } from "react-router-dom";
 import { friendlyErrorMessage } from "@/lib/errors";
 import { bumpStatus } from "@/domain/poStatus";
+import { weightAnomalies } from '@/domain/shipmentTotals';
 
 const EMPTY_PO = { po_number: "", po_prefix: "50", dept_number: "81", vendor_id: "", invoice_number: "", invoice_date: "", freight_terms: "EXW", currency: "CAD", ship_date: "", cancel_date: "", status: "draft", notes: "", items: [], container_number: "", seal_number: "", total_cartons: 0, total_pallets: 0, total_gross_weight_kg: 0, total_net_weight_kg: 0, total_cbm: 0, load_type: "FCL", pre_ticketed: false, store_ready: false, apl_booking_number: "", exporter_name: "Mendel Hart", exporter_title: "" };
 
-const EMPTY_ITEM = { product_id: "", item_number: "", vendor_style: "", description: "", upc_code: "", hs_code: "2106.90.99.98", schedule_b: "2106.90.99.98", country_of_origin: "USA", unit_price: 0, units_per_carton: 6, num_cartons: 0, total_units: 0, gross_weight_kg: 5.0, net_weight_kg: 5.1, cbm: 0.015, size: "750ml" };
+const EMPTY_ITEM = { product_id: "", item_number: "", vendor_style: "", description: "", upc_code: "", hs_code: "2106.90.99.98", schedule_b: "2106.90.99.98", country_of_origin: "USA", unit_price: 0, units_per_carton: 6, num_cartons: 0, total_units: 0, gross_weight_kg: 5.1, net_weight_kg: 5.0, cbm: 0.015, size: "750ml" };
 
-const AUTO_SPECS = { gross_weight_kg: 5.0, net_weight_kg: 5.1, cbm: 0.015 };
+// Gross is net plus packaging, so gross must be the larger number. These were
+// the wrong way round, which put "net heavier than gross" on any commercial
+// invoice whose products had no measured weights — a physical impossibility
+// and a standard customs query.
+const AUTO_SPECS = { gross_weight_kg: 5.1, net_weight_kg: 5.0, cbm: 0.015 };
 
 // Same 402/403 classification used across the other pages/components.
 
@@ -324,7 +329,10 @@ Extract the following fields:
     ["upc_code", "upc_code"],
     ["hs_code", "hs_code"],
     ["schedule_b", "schedule_b"],
-    ["unit_price", "unit_price_usd"],
+    // The PO carries CAD (the field is labelled "Price/Unit (CAD)" and is
+    // sourced from prod.unit_price_cad). Writing it to unit_price_usd left the
+    // catalog showing a blank price and sorting it as missing.
+    ["unit_price", "unit_price_cad"],
     ["units_per_carton", "units_per_carton"],
     ["gross_weight_kg", "carton_gross_weight_kg"],
     ["net_weight_kg", "carton_net_weight_kg"],
@@ -426,6 +434,7 @@ Extract the following fields:
   };
 
   const items = form.items || [];
+  const weightWarnings = weightAnomalies(items);
   const vendorsSafe = vendors || [];
   const productsSafe = products || [];
 
@@ -446,6 +455,16 @@ Extract the following fields:
 
       {saveError && (
         <div className="bg-red-50 border-b border-red-200 px-6 py-2 text-sm text-red-700">{saveError}</div>
+      )}
+
+      {/* Net above gross is physically impossible and is a standard customs
+          query. Surfaced here rather than blocking the save, so a PO can still
+          be captured while the real weights are chased up. */}
+      {weightWarnings.length > 0 && (
+        <div role="alert" className="bg-amber-50 border-b border-amber-200 px-6 py-2 text-sm text-amber-900">
+          Net weight is higher than gross on {weightWarnings.map((w) => w.itemNumber).join(", ")}.
+          Gross is net plus packaging, so gross must be the larger number — customs will query this.
+        </div>
       )}
 
       {/* Documents banner */}

@@ -34,18 +34,27 @@ begin
   end loop;
 end $$;
 
-create policy "buckets read (authenticated)" on storage.objects for select
-  to authenticated using (bucket_id in ('invoices','uploads'));
+-- is_member() was applied to all eight tables and never to storage, so any
+-- account that could authenticate could list and download every customer
+-- invoice PDF -- including the `invoices` bucket belonging to the other app
+-- sharing this project. "authenticated" is not the same as "one of us".
 
-create policy "buckets insert (authenticated)" on storage.objects for insert
-  to authenticated with check (bucket_id in ('invoices','uploads') and owner = auth.uid());
+create policy "buckets read (members)" on storage.objects for select
+  to authenticated using (bucket_id in ('invoices','uploads') and public.is_member());
+
+create policy "buckets insert (members)" on storage.objects for insert
+  to authenticated with check (bucket_id in ('invoices','uploads')
+                               and public.is_member()
+                               and owner = auth.uid());
 
 create policy "buckets update (owner or admin)" on storage.objects for update
   to authenticated using (bucket_id in ('invoices','uploads')
+                          and public.is_member()
                           and (owner = auth.uid() or public.is_admin()));
 
 create policy "buckets delete (owner or admin)" on storage.objects for delete
   to authenticated using (bucket_id in ('invoices','uploads')
+                          and public.is_member()
                           and (owner = auth.uid() or public.is_admin()));
 
 -- Verify: expect exactly these four, all scoped to {authenticated}.

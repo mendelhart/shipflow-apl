@@ -19,9 +19,9 @@ const po = {
   pre_ticketed: true,
   items: [
     { item_number: '1002', description: 'Sugar Free Maple Bacon Syrup', vendor_style: '1002',
-      units_per_carton: 6, size: '750ml', upc_code: '628693015028', num_cartons: 3 },
+      units_per_carton: 6, size: '750ml', upc_code: '628693015028', num_cartons: 3, country_of_origin: 'USA' },
     { item_number: '1010', description: 'Vanilla Syrup', vendor_style: '1010',
-      units_per_carton: 6, size: '750ml', upc_code: '628693015103', num_cartons: 2 },
+      units_per_carton: 6, size: '750ml', upc_code: '628693015103', num_cartons: 2, country_of_origin: 'USA' },
   ],
 };
 
@@ -136,4 +136,60 @@ test('a 4x6 label lands on the intended 1.8x magnification', () => {
   const g = barcodeGeometry({ availW: 267, availH: 200 });
   assert.equal(Number(g.mag.toFixed(2)), 1.8);
   assert.equal(Number((g.barsW / 72).toFixed(2)), 2.22); // inches of bars
+});
+
+/* ---- Box numbering and pre-flight ---------------------------------- */
+
+const poTwoItems = {
+  po_prefix: '50',
+  po_number: '813584',
+  items: [
+    { item_number: '1002', description: 'Maple Syrup', upc_code: '628693015028', num_cartons: 3, units_per_carton: 6, size: '750ml', country_of_origin: 'USA' },
+    { item_number: '1010', description: 'Vanilla Syrup', upc_code: '628693015103', num_cartons: 2, units_per_carton: 6, size: '750ml', country_of_origin: 'USA' },
+  ],
+};
+
+const boxLinesOf = async (po, startBox) => {
+  const { doc } = await buildCartonLabelsPdf({ po, startBox });
+  const raw = doc.output('arraybuffer');
+  const text = Buffer.from(raw).toString('latin1');
+  return [...text.matchAll(/Box (\d+) of (\d+)/g)].map((m) => `${m[1]} of ${m[2]}`);
+};
+
+test('box numbers run across the whole PO, not per line item', async () => {
+  // Was "1 of 3, 2 of 3, 3 of 3, 1 of 2, 2 of 2" — two physically different
+  // cartons both labelled Box 1, and no label stating the real total.
+  assert.deepEqual(await boxLinesOf(poTwoItems, 1), [
+    '1 of 5', '2 of 5', '3 of 5', '4 of 5', '5 of 5',
+  ]);
+});
+
+test('startBox offsets the run once, not once per item', async () => {
+  assert.deepEqual(await boxLinesOf(poTwoItems, 100), [
+    '100 of 104', '101 of 104', '102 of 104', '103 of 104', '104 of 104',
+  ]);
+});
+
+test('an item with no UPC stops the run instead of printing blank barcodes', async () => {
+  const po = { ...poTwoItems, items: [{ ...poTwoItems.items[0], upc_code: '' }] };
+  await assert.rejects(() => buildCartonLabelsPdf({ po }), /No UPC on 1002/);
+});
+
+test('a wrong check digit stops the run instead of printing a corrected barcode', async () => {
+  const po = { ...poTwoItems, items: [{ ...poTwoItems.items[0], upc_code: '628693015029' }] };
+  await assert.rejects(() => buildCartonLabelsPdf({ po }), /check digit is wrong/);
+});
+
+test('a very long description cannot squeeze the barcode out of spec', async () => {
+  const po = { ...poTwoItems, items: [{ ...poTwoItems.items[0], description: 'X'.repeat(600) }] };
+  const { total } = await buildCartonLabelsPdf({ po });
+  assert.equal(total, 3, 'the run should complete, with the description truncated');
+});
+
+test('a blank country of origin stops the run rather than printing "USA"', async () => {
+  // 152 of the 667 live line items are from China. The old `|| 'USA'` default
+  // put a false origin on a customs-facing carton label whenever the field was
+  // empty, and the on-screen preview hardcoded USA regardless.
+  const po = { ...poTwoItems, items: [{ ...poTwoItems.items[0], country_of_origin: '' }] };
+  await assert.rejects(() => buildCartonLabelsPdf({ po }), /Country of origin is blank/);
 });

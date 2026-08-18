@@ -52,7 +52,14 @@ export default function BulkEditDialog({ open, onClose, products, selectedIds, o
       setError(`"${FIELDS.find(f => f.key === badNumber)?.label || badNumber}" is not a valid number.`);
       return;
     }
-    if (Object.keys(updates).length === 0) return;
+    if (Object.keys(updates).length === 0) {
+      setError(
+        Object.values(enabled).some(Boolean)
+          ? "Enter a value for each field you have checked."
+          : "Check at least one field to change."
+      );
+      return;
+    }
 
     setSaving(true);
     setError("");
@@ -88,8 +95,12 @@ export default function BulkEditDialog({ open, onClose, products, selectedIds, o
 
     setSaving(false);
     setProgress(null);
-    onSuccess();
 
+    // onSuccess() used to run here, before the failure check. It clears the
+    // selection, and targetIds falls back to EVERY product when the selection is
+    // empty — so a dialog left open to show 2 failures silently retargeted its
+    // own retry button at the whole catalog. Only tell the caller we succeeded
+    // once we know we did.
     if (failures.length > 0) {
       setError(
         `${targetIds.length - failures.length} of ${targetIds.length} products updated. ` +
@@ -99,14 +110,23 @@ export default function BulkEditDialog({ open, onClose, products, selectedIds, o
       );
       return; // keep the dialog open so the failures are visible
     }
+    onSuccess();
+    // Not handleClose(): `saving` is still true in this closure (setSaving is
+    // async), so handleClose's in-flight guard would swallow the reset and the
+    // dialog would reopen pre-filled with the last edit.
+    resetForm();
     onClose();
+  };
+
+  const resetForm = () => {
+    setEnabled({});
+    setValues({});
+    setError("");
   };
 
   const handleClose = () => {
     if (saving) return; // don't discard an in-flight bulk update
-    setEnabled({});
-    setValues({});
-    setError("");
+    resetForm();
     onClose();
   };
 

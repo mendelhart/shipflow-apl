@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { base44 } from "@/api/base44Client";
-import { addPaginatedImage } from "@/lib/paginatedImage";
 import { invokeLLM, uploadFile } from "@/lib/aiClient";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Upload, Sparkles, Loader2, Printer, FileText, Package, X, RefreshCw, Save, FolderOpen, ChevronRight, Trash2, Download, Tag, AlertCircle } from "lucide-react";
@@ -439,11 +438,34 @@ Extract EVERY line item. Do not skip any rows.`,
     if (!el) return;
 
     const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
     const margin = 20;
+    const contentW = pageW - margin * 2;
 
     const canvas = await html2canvas(el, { scale: 1.2, useCORS: true, logging: false, backgroundColor: "#ffffff" });
     const imgData = canvas.toDataURL("image/jpeg", 0.75);
-    addPaginatedImage(pdf, imgData, { margin });
+    const imgH = (canvas.height * contentW) / canvas.width;
+    const pageContentH = pageH - margin * 2;
+
+    // FIX: the previous version redrew the same full image at the same
+    // (margin, margin) position on every page, so any invoice/packing list
+    // spanning more than one page just repeated page 1's content instead of
+    // continuing. Same fix as CommercialInvoice.jsx: draw the SAME
+    // full-height image every time, but shift its y-position up by one
+    // page's height on each iteration so a different vertical band lands
+    // in the visible page area.
+    let heightLeft = imgH;
+    let position = margin;
+    let firstPage = true;
+
+    while (heightLeft > 0) {
+      if (!firstPage) pdf.addPage();
+      pdf.addImage(imgData, "JPEG", margin, position, contentW, imgH, undefined, "FAST");
+      heightLeft -= pageContentH;
+      position -= pageContentH;
+      firstPage = false;
+    }
 
     pdf.save(`${docType === "invoice" ? "Invoice" : "PackingList"}_${data.po || data.invoiceNumber || "document"}.pdf`);
   };

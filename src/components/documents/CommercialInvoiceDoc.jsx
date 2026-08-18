@@ -121,7 +121,9 @@ export default function CommercialInvoiceDoc({ po, vendor, settings = {} }) {
         </thead>
         <tbody>
           {items.map((item, i) => {
-            const hsb = "2106.90.99.98";
+            // Was hardcoded, so this invoice declared one tariff code while the
+            // Food Data Checklist in the same packet declared the item's real one.
+            const hsb = item.hs_code || "2106.90.99.98";
             return (
               <tr key={i} style={{ fontSize: "9px" }}>
                 <td style={cell}>{item.item_number}</td>

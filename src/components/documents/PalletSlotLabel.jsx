@@ -1,28 +1,32 @@
+import { normalizeUpc, encodeUpcBars, QUIET_MODULES } from "@/domain/upc";
+/**
+ * Pallet slot barcode.
+ *
+ * This had its own private copy of the UPC-A encoding tables, plus
+ * `padStart(12,'0').slice(0,12)` — which turns the EAN-13 form 0628693015028
+ * into 062869301502: wrong check digit, and not the same code as the carton
+ * label on the same pallet. It also started bars at x=0 with no quiet zone and
+ * widened every dark module by 0.5px against a 3.16px module, a 16% bar-gain
+ * error. @/domain/upc exists precisely so there is one encoder.
+ */
 function UPCBarcode({ upc }) {
-  const code = String(upc || "").replace(/\D/g, "").padStart(12, "0").slice(0, 12);
+  const { code, isEmpty, checkMismatch, providedCheck } = normalizeUpc(upc);
+  if (isEmpty) return null;
 
-  const L = ["0001101","0011001","0010011","0111101","0100011","0110001","0101111","0111011","0110111","0001011"];
-  const R = ["1110010","1100110","1101100","1000010","1011100","1001110","1010000","1000100","1001000","1110100"];
-
-  const digits = code.split("").map(Number);
-
-  let bars = "101";
-  digits.slice(0, 6).forEach(d => bars += L[d]);
-  bars += "01010";
-  digits.slice(6, 12).forEach(d => bars += R[d]);
-  bars += "101";
-
-  // Scale barcode to fill the available width (~3.0in usable in the right column)
-  const targetWidth = 300; // px ≈ 3.1in at 96dpi
-  const barWidth = targetWidth / bars.length;
-  const height = 120;
-  const totalWidth = bars.length * barWidth;
+  const bars = encodeUpcBars(code);
+  const targetWidth = 300; // px, ~3.1in at 96dpi — fills the right column
+  const barWidth = targetWidth / (bars.length + QUIET_MODULES * 2);
+  const quietWidth = QUIET_MODULES * barWidth;
+  const barsWidth = bars.length * barWidth;
+  const totalWidth = barsWidth + quietWidth * 2;
+  // Height follows width at the GS1 ratio (25.9mm tall / 31.35mm of bars).
+  const height = Math.round(barsWidth * (25.9 / 31.35));
 
   return (
     <svg width={totalWidth} height={height + 22} style={{ display: "block", margin: "0 auto", maxWidth: "100%" }}>
       {bars.split("").map((b, i) =>
         b === "1" ? (
-          <rect key={i} x={i * barWidth} y={0} width={barWidth + 0.5} height={height} fill="#000" />
+          <rect key={i} x={quietWidth + i * barWidth} y={0} width={barWidth} height={height} fill="#000" />
         ) : null
       )}
       <text
@@ -36,9 +40,15 @@ function UPCBarcode({ upc }) {
       >
         {code}
       </text>
+      {checkMismatch && (
+        <text x={totalWidth / 2} y={height + 34} textAnchor="middle" fontSize="9" fill="#c00" fontWeight="bold">
+          check digit mismatch - stored as ...{providedCheck}
+        </text>
+      )}
     </svg>
   );
 }
+
 
 const sectionStyle = {
   border: "3px solid #000",
