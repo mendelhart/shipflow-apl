@@ -10,6 +10,7 @@ import CartonLabel from "@/components/documents/CartonLabel";
 import { formatPoNumber } from "@/utils/poNumber";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
 import { labelPlan } from "@/domain/labelContent";
+import { openPalletLabelsWindow } from "@/utils/palletLabels";
 
 export default function Labels() {
   const navigate = useNavigate();
@@ -38,6 +39,7 @@ export default function Labels() {
     : null;
 
   const { plan: labelPlanItems, total: totalCartons } = labelPlan(po || {}, startBox);
+  const palletCount = parseInt(po?.total_pallets) || 0;
 
   // Both buttons build the SAME document. Previously "Print" used the DOM and
   // "PDF" rasterised that DOM, so the two paths could diverge; now there is one
@@ -163,11 +165,39 @@ export default function Labels() {
                 <span className="font-medium">
                   {totalCartons.toLocaleString()} label{totalCartons === 1 ? "" : "s"}
                 </span>{" "}
-                will be produced — one per carton, numbered from {startBox}.
+                will be produced — one per carton, numbered {startBox} to {startBox - 1 + totalCartons}
+                {" "}across the whole PO.
               </div>
               <div className="text-xs text-slate-500">
                 Preview shows one sample per item
               </div>
+            </div>
+
+            {/* Pallet labels are made right after the cartons are stickered and
+                before a container is assigned, so they belong next to the carton
+                labels rather than only on the container-planning screen. */}
+            <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-slate-200 px-4 py-3">
+              <div className="text-sm text-slate-700">
+                <span className="font-medium">Pallet labels</span>
+                {palletCount > 0
+                  ? ` — ${palletCount} for this PO, numbered 1 to ${palletCount}.`
+                  : " — set this PO's pallet count first (Purchase Orders → edit → Total Pallets)."}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={palletCount === 0}
+                onClick={() =>
+                  openPalletLabelsWindow({
+                    selectedPOObjects: [po],
+                    vendors,
+                    getPalletCount: (p) => parseInt(p.total_pallets) || 0,
+                  })
+                }
+              >
+                <Printer className="w-4 h-4 mr-2" />
+                Pallet labels
+              </Button>
             </div>
 
             {pdfError && (

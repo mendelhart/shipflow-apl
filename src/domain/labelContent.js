@@ -11,14 +11,29 @@ export const SHIP_TO = {
 export const FROM_ADDRESS =
   'Capital Nutrition Inc.\n1020 Boul. Michèle-Bohec\nBlainville, QC, J7C 5E2\nCanada';
 
-export const shipToFor = (po) => SHIP_TO[po?.po_prefix] || SHIP_TO['50'];
+/**
+ * Ship-to for a PO prefix. Returns undefined for an unrecognised prefix rather
+ * than defaulting — a blank or future prefix used to silently address every
+ * carton to the London processing centre. Callers check and refuse to print.
+ */
+export const shipToFor = (po) => SHIP_TO[po?.po_prefix];
+
+/** Human-readable list of the prefixes we can actually ship to. */
+export const KNOWN_PREFIXES = Object.keys(SHIP_TO);
+
+/** The PO number as it should appear on a label: prefix and number together. */
+export const labelPoNumber = (po) =>
+  po?.po_prefix ? `${po.po_prefix} ${po.po_number ?? ''}`.trim() : String(po?.po_number ?? '');
 
 /**
  * The eight labelled cells, in the order they appear on the label.
  * One definition, so the preview and the printed carton always agree.
  */
 export const labelCells = (po, item) => [
-  ['PO', po?.po_number],
+  // formatPoNumber elsewhere prints "50 813584"; this printed the bare number,
+  // so an AI-imported PO said "813584" on the carton and "50 813584" on its
+  // invoice and packing list.
+  ['PO', labelPoNumber(po)],
   ['DEPT', po?.dept_number],
   ['ITEM', item?.item_number],
   ['STYLE', item?.vendor_style],

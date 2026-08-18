@@ -19,7 +19,7 @@
  */
 
 import { normalizeUpc, encodeUpcBars, QUIET_MODULES } from '@/domain/upc';
-import { FROM_ADDRESS, shipToFor, labelCells, labelPlan } from '@/domain/labelContent';
+import { FROM_ADDRESS, shipToFor, labelCells, labelPlan, KNOWN_PREFIXES } from '@/domain/labelContent';
 
 // 4in x 6in at 72pt/in.
 const PAGE_W = 288;
@@ -253,6 +253,14 @@ export async function buildCartonLabelsPdf({ po, startBox = 1, onProgress }) {
   // correcting the bars, so the label disagreed with the product master; and a
   // long description squeezed the symbol below the 0.8x GS1 floor, or out of
   // existence entirely, with no warning. Fail before page one instead.
+  if (!shipToFor(po)) {
+    throw new Error(
+      `PO prefix "${po?.po_prefix ?? ''}" has no ship-to address (known prefixes: ` +
+      `${KNOWN_PREFIXES.join(', ')}). This used to default to the London processing ` +
+      `centre, which would send the whole shipment to the wrong country.`
+    );
+  }
+
   const missingUpc = [];
   const badCheckDigit = [];
   const missingCoo = [];

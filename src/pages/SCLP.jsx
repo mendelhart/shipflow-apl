@@ -357,7 +357,7 @@ export default function SCLP() {
       alert("No pallets to print. Please set pallet counts for the selected POs.");
       return;
     }
-    openPalletLabelsWindow({ selectedPOObjects, vendors, fields, getPalletCount });
+    openPalletLabelsWindow({ selectedPOObjects, vendors, getPalletCount });
   };
 
   // Build one combined doc per container (both POs' items merged).
