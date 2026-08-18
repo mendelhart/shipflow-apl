@@ -6,12 +6,13 @@ import pluginUnusedImports from "eslint-plugin-unused-imports";
 
 export default [
   {
-    files: [
-      "src/components/**/*.{js,mjs,cjs,jsx}",
-      "src/pages/**/*.{js,mjs,cjs,jsx}",
-      "src/Layout.jsx",
-    ],
-    ignores: ["src/lib/**/*", "src/components/ui/**/*"],
+    // Widened from components+pages: src/domain, src/lib, src/hooks, src/utils
+    // and src/api were never linted at all, which is a lot of the code that
+    // documents and labels are built from.
+    files: ["src/**/*.{js,mjs,cjs,jsx}"],
+    // src/lib was excluded and is where emailDocs, aiClient and the label
+    // builders live. Only the vendored shadcn components stay out.
+    ignores: ["src/components/ui/**/*"],
     ...pluginJs.configs.recommended,
     ...pluginReact.configs.flat.recommended,
     languageOptions: {
@@ -35,6 +36,12 @@ export default [
       "unused-imports": pluginUnusedImports,
     },
     rules: {
+      // `...pluginJs.configs.recommended` above is overwritten by this `rules`
+      // object, so no-undef was never actually on. A missing import is then a
+      // bare global: Rollup does not complain, the build succeeds, and the page
+      // dies at runtime with "X is not defined". That is exactly how a missing
+      // `groupPosByShipMonth` import shipped to production.
+      "no-undef": "error",
       "no-unused-vars": "off",
       "react/jsx-uses-vars": "error",
       "react/jsx-uses-react": "error",

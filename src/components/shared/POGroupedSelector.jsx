@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight, FolderOpen, Folder } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatPoNumber } from "@/utils/poNumber";
+import { groupPosByShipMonth } from "@/domain/poGrouping";
 
 /**
  * Groups POs by the month they SHIP into collapsible folders. Grouping used to

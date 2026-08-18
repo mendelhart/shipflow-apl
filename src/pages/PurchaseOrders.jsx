@@ -101,7 +101,10 @@ export default function PurchaseOrders() {
           // throw out of the whole loop, leaving the button stuck on
           // "running" forever with no indication of what happened or
           // which POs got updated before the failure.
-          failedPo = po;
+          // `po` is declared inside the try block by the re-read, so it is out
+          // of scope here — referencing it threw a ReferenceError from inside
+          // the catch, masking the real failure. stalePo is the loop variable.
+          failedPo = stalePo;
           throw err;
         }
       }
