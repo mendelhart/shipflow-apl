@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { format } from "date-fns";
 import { ChevronDown, ChevronRight, FolderOpen, Folder } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatPoNumber } from "@/utils/poNumber";
 
 /**
- * Groups POs by their upload date (created_date) into collapsible folders.
+ * Groups POs by the month they SHIP into collapsible folders. Grouping used to
+ * key off created_date - the day the PO was typed in - so an August sailing
+ * entered in March filed itself under March.
  * Props:
  *  - pos: array of PO objects
  *  - selectedIds: array of selected PO ids
@@ -14,24 +15,11 @@ import { formatPoNumber } from "@/utils/poNumber";
  *  - mode: "multi" (default, checkboxes) | "single" (radio, calls onToggle with single id)
  */
 export default function POGroupedSelector({ pos, selectedIds, onToggle, onToggleGroup, mode = "multi" }) {
-  // Group POs by upload month/year (e.g. "May 2026")
-  const groups = {};
-  pos.forEach(po => {
-    const raw = po.created_date;
-    let dateKey = "Unknown Date";
-    if (raw) {
-      try { dateKey = format(new Date(raw), "MMMM yyyy"); } catch {}
-    }
-    if (!groups[dateKey]) groups[dateKey] = [];
-    groups[dateKey].push(po);
-  });
-
-  // Sort groups by date descending (most recent first)
-  const sortedKeys = Object.keys(groups).sort((a, b) => {
-    if (a === "Unknown Date") return 1;
-    if (b === "Unknown Date") return -1;
-    return new Date(b) - new Date(a);
-  });
+  // Grouped by SHIP month, not the day the PO was entered — see
+  // @/domain/poGrouping. Unscheduled POs come first.
+  const ordered = groupPosByShipMonth(pos);
+  const groups = Object.fromEntries(ordered.map((g) => [g.key, g.pos]));
+  const sortedKeys = ordered.map((g) => g.key);
 
   // Open the first group (most recent) by default
   const [openGroups, setOpenGroups] = useState(() => {

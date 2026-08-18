@@ -10,10 +10,10 @@ import POForm from "@/components/po/POForm.jsx";
 import EmailAplDialog from "@/components/po/EmailAplDialog";
 import EmailTjxEuropeDialog from "@/components/po/EmailTjxEuropeDialog";
 import { formatPoNumber } from "@/utils/poNumber";
-import { format } from "date-fns";
 import { friendlyErrorMessage } from "@/lib/errors";
 import { bumpStatus } from "@/domain/poStatus";
 import { shipmentTotals } from '@/domain/shipmentTotals';
+import { groupPosByShipMonth } from "@/domain/poGrouping";
 
 // Same 402/403 classification used across the other pages (TjxCanada.jsx,
 // Invoices.jsx, CommercialInvoice.jsx, CustomerDocs.jsx, Settings.jsx).
@@ -123,19 +123,11 @@ export default function PurchaseOrders() {
 
   const vendorMap = Object.fromEntries(vendors.map((v) => [v.id, v.company_name]));
 
-  const getGroupKey = (po) => {
-    try {return format(new Date(po.created_date), "MMMM yyyy");}
-    catch {return "Unknown Date";}
-  };
-
-  const groups = pos.reduce((acc, po) => {
-    const key = getGroupKey(po);
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(po);
-    return acc;
-  }, {});
-
-  const groupKeys = Object.keys(groups);
+  // Grouped by SHIP month rather than the day the PO was entered: a PO typed
+  // in March for an August sailing used to file itself under March.
+  const orderedGroups = groupPosByShipMonth(pos);
+  const groups = Object.fromEntries(orderedGroups.map((g) => [g.key, g.pos]));
+  const groupKeys = orderedGroups.map((g) => g.key);
 
   const [activeTab, setActiveTab] = useState(null);
   const defaultTab = groupKeys[0] || null;
