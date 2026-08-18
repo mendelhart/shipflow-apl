@@ -15,15 +15,16 @@ function UPCBarcode({ upc }) {
   const bars = encodeUpcBars(code);
 
   const barWidth = 2;
-  // FIX: bars previously started at x=0 with no blank margin on either
-  // side. UPC-A scanners require a "quiet zone" (blank space, no marks) of
-  // roughly 9 module-widths on both sides to detect where the barcode
-  // starts/stops — without it, many real scanners won't recognize this as
-  // a barcode at all, even if the encoded digits are perfectly correct.
+  // Bars need a "quiet zone" — blank space, no marks — of ~9 module widths on
+  // both sides, or many scanners won't find the symbol at all however correct
+  // the digits are.
   const quietWidth = QUIET_MODULES * barWidth;
   const barsWidth = bars.length * barWidth;
   const totalWidth = barsWidth + quietWidth * 2;
-  const height = 60;
+  // Height follows width at the GS1 UPC-A ratio (25.9mm tall / 31.35mm of bars)
+  // rather than a fixed 60px, so this preview is the same shape as what
+  // cartonLabelPdf.js actually prints.
+  const height = Math.round(barsWidth * (25.9 / 31.35));
 
   return (
     <div style={{ textAlign: "center" }}>

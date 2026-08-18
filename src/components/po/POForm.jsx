@@ -35,6 +35,7 @@ export default function POForm({ po, onClose }) {
   const [form, setForm] = useState(() => (po ? { ...EMPTY_PO, ...po, items: Array.isArray(po.items) ? po.items : [], exporter_name: po.exporter_name || EMPTY_PO.exporter_name } : { ...EMPTY_PO }));
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
+  const [syncSummary, setSyncSummary] = useState("");
   const [aiFile, setAiFile] = useState(null);
   const [aiPreview, setAiPreview] = useState(null);
   const fileInputRef = useRef(null);
@@ -317,30 +318,105 @@ Extract the following fields:
     navigate(`/${type}?po=${savedIdRef.current}`);
   };
 
+  // Maps a PO line item onto product-catalog column names. Used for both the
+  // update path and the create path so the two can't drift apart.
+  const CATALOG_FIELDS = [
+    ["upc_code", "upc_code"],
+    ["hs_code", "hs_code"],
+    ["schedule_b", "schedule_b"],
+    ["unit_price", "unit_price_usd"],
+    ["units_per_carton", "units_per_carton"],
+    ["gross_weight_kg", "carton_gross_weight_kg"],
+    ["net_weight_kg", "carton_net_weight_kg"],
+    ["cbm", "carton_cbm"],
+    ["size", "size"],
+    ["country_of_origin", "country_of_origin"],
+    ["vendor_style", "vendor_style"],
+  ];
+
+  const blank = (v) => v === undefined || v === null || v === "";
+
+  /**
+   * Sync line items into the product catalog.
+   *
+   * This previously only ever *updated* products that were already in the
+   * catalog. An item whose item_number wasn't there yet was silently skipped —
+   * and the button still reported "Synced". So the one thing the label
+   * promises, adding new items to the catalog, was the one thing it did not do.
+   * It now creates the missing ones, and reports what actually happened rather
+   * than always claiming success.
+   */
   const syncProductsFromPO = async (items) => {
     const itemsToSync = items || form.items || [];
     if (!itemsToSync.length) return;
     setSyncStatus("syncing");
+    setSyncSummary("");
     try {
+      let created = 0;
+      let updated = 0;
+      let unchanged = 0;
+      const skipped = [];
+
       for (const item of itemsToSync) {
-        const prod = products.find(p => p.id === item.product_id || (item.item_number && p.item_number === item.item_number));
+        const prod = products.find(
+          (p) => p.id === item.product_id || (item.item_number && p.item_number === item.item_number)
+        );
+
         if (prod) {
           const updates = {};
-          if (item.upc_code && item.upc_code !== prod.upc_code) updates.upc_code = item.upc_code;
-          if (item.hs_code && item.hs_code !== prod.hs_code) updates.hs_code = item.hs_code;
-          if (item.schedule_b && item.schedule_b !== prod.schedule_b) updates.schedule_b = item.schedule_b;
-          if (item.unit_price && item.unit_price !== prod.unit_price_usd) updates.unit_price_usd = item.unit_price;
-          if (item.units_per_carton && item.units_per_carton !== prod.units_per_carton) updates.units_per_carton = item.units_per_carton;
-          if (item.gross_weight_kg && item.gross_weight_kg !== prod.carton_gross_weight_kg) updates.carton_gross_weight_kg = item.gross_weight_kg;
-          if (item.net_weight_kg && item.net_weight_kg !== prod.carton_net_weight_kg) updates.carton_net_weight_kg = item.net_weight_kg;
-          if (item.cbm && item.cbm !== prod.carton_cbm) updates.carton_cbm = item.cbm;
-          if (item.size && item.size !== prod.size) updates.size = item.size;
-          if (item.description && !prod.description) updates.description = item.description;
-          if (item.country_of_origin && item.country_of_origin !== prod.country_of_origin) updates.country_of_origin = item.country_of_origin;
-          if (Object.keys(updates).length > 0) await base44.entities.Product.update(prod.id, updates);
+          for (const [from, to] of CATALOG_FIELDS) {
+            if (!blank(item[from]) && item[from] !== prod[to]) updates[to] = item[from];
+          }
+          if (!blank(item.description) && blank(prod.description)) updates.description = item.description;
+          if (Object.keys(updates).length > 0) {
+            await base44.entities.Product.update(prod.id, updates);
+            updated++;
+          } else {
+            unchanged++;
+          }
+          continue;
+        }
+
+        // Not in the catalog — create it. item_number and description are both
+        // NOT NULL in the database, so an item missing either can't become a
+        // product; say so instead of failing the whole run.
+        const itemNumber = String(item.item_number || "").trim();
+        const description = String(item.description || "").trim();
+        if (!itemNumber) {
+          skipped.push("a line with no item number");
+          continue;
+        }
+        if (!description) {
+          skipped.push(`${itemNumber} (no description)`);
+          continue;
+        }
+
+        const record = { item_number: itemNumber, description };
+        for (const [from, to] of CATALOG_FIELDS) {
+          if (!blank(item[from])) record[to] = item[from];
+        }
+
+        try {
+          await base44.entities.Product.create(record);
+          created++;
+        } catch (err) {
+          // 409 = someone else added this item_number since this page loaded.
+          // Not an error worth failing the batch over.
+          if (err?.status === 409) skipped.push(`${itemNumber} (already in the catalog)`);
+          else throw err;
         }
       }
+
       qc.invalidateQueries({ queryKey: ["products"] });
+
+      const parts = [];
+      if (created) parts.push(`${created} added`);
+      if (updated) parts.push(`${updated} updated`);
+      if (unchanged) parts.push(`${unchanged} already up to date`);
+      let summary = parts.length ? parts.join(", ") : "Nothing to sync";
+      if (skipped.length) summary += `. Skipped: ${skipped.join(", ")}`;
+      setSyncSummary(summary);
+
       setSyncStatus("done");
       setTimeout(() => setSyncStatus(null), 3000);
     } catch (err) {
@@ -570,6 +646,12 @@ Extract the following fields:
                   <Button size="sm" variant="outline" onClick={addItem}><Plus className="w-3 h-3 mr-1" />Add Item</Button>
                 </div>
               </div>
+              {syncSummary && (
+                <div role="status" className="mb-3 text-xs text-gray-700 bg-gray-50 border rounded-lg px-3 py-2 flex items-start gap-2">
+                  <span className="flex-1">{syncSummary}</span>
+                  <button onClick={() => setSyncSummary("")} className="text-gray-400 hover:text-gray-600" aria-label="Dismiss">×</button>
+                </div>
+              )}
               {items.length === 0 && <div className="text-center py-8 text-gray-400 text-sm">Use AI import above or add items manually.</div>}
               <div className="space-y-3">
                 {items.map((item, idx) => (

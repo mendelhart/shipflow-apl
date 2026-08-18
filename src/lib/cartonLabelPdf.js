@@ -35,6 +35,39 @@ const pt = (px) => px * 0.75;
 
 const FONT = 'helvetica'; // metric-compatible stand-in for Arial
 
+// UPC-A at 100% magnification: 0.33mm module, 25.9mm bar height (GS1 spec).
+// 1pt = 0.3528mm.
+const MM_PER_PT = 0.3528;
+const NOMINAL_MODULE_PT = 0.33 / MM_PER_PT;  // ~0.935pt
+const NOMINAL_BAR_H_PT = 25.9 / MM_PER_PT;   // ~73.4pt
+// GS1 permits 0.80x-2.00x. Cartons are scanned at a distance in a warehouse,
+// so aim high within spec rather than at nominal.
+const MAX_MAG = 2.0;
+const TARGET_MAG = 1.8;
+
+/**
+ * Size a UPC-A symbol for the space available, preserving its aspect ratio.
+ * Exported so the spec compliance can be asserted without rendering a PDF.
+ *
+ * @returns {{mag:number, moduleW:number, barH:number, barsW:number, inSpec:boolean}}
+ */
+export function barcodeGeometry({ availW, availH, bars = 95, quiet = QUIET_MODULES }) {
+  const modules = bars + quiet * 2;
+  const mag = Math.min(
+    TARGET_MAG,
+    MAX_MAG,
+    availW / (modules * NOMINAL_MODULE_PT),
+    availH / NOMINAL_BAR_H_PT
+  );
+  return {
+    mag,
+    moduleW: NOMINAL_MODULE_PT * mag,
+    barH: NOMINAL_BAR_H_PT * mag,
+    barsW: bars * NOMINAL_MODULE_PT * mag,
+    inSpec: mag >= 0.8 && mag <= 2.0,
+  };
+}
+
 function box(doc, x, y, w, h) {
   doc.setLineWidth(BORDER);
   doc.setDrawColor(0);
@@ -126,22 +159,36 @@ function drawLabel(doc, { po, item, boxNumber, totalBoxes }) {
   centredLines(doc, descLines, x, w, y + INNER, descLH);
   y += descH + GAP;
 
-  /* ---- Barcode fills the remainder ---- */
+  /* ---- Barcode ---- */
   const barcodeH = PAGE_H - PAD - y;
   if (barcodeH > 20) {
     box(doc, x, y, w, barcodeH);
     const upc = normalizeUpc(item?.upc_code);
     if (!upc.isEmpty) {
       const bars = encodeUpcBars(upc.code);
-      // Fit the bars, plus a quiet zone each side, to the available width.
-      const modules = bars.length + QUIET_MODULES * 2;
-      const moduleW = Math.min((w - INNER * 4) / modules, 2);
-      const barsW = bars.length * moduleW;
+
       const digitsH = pt(10) * 1.4;
       const warnH = upc.checkMismatch ? pt(8) * 1.4 : 0;
-      const barH = Math.max(12, barcodeH - INNER * 2 - digitsH - warnH);
+      const availW = w - INNER * 4;
+      const availH = barcodeH - INNER * 2 - digitsH - warnH;
+
+      // Both dimensions come from ONE magnification factor.
+      //
+      // This previously set the module width to a flat 2pt and then let the bar
+      // height be "whatever is left on the page". Two consequences: the symbol
+      // came out 2.64in wide, which is 2.14x nominal and outside the 0.8x-2.0x
+      // magnification UPC-A permits; and its height had no relationship to its
+      // width, so a label with a short description stretched the bars down the
+      // page while a long one squashed them. Scanners read the ratio, and print
+      // shops reject out-of-spec symbols.
+      const geo = barcodeGeometry({ availW, availH, bars: bars.length });
+      const { moduleW, barH } = geo;
+      const barsW = bars.length * moduleW;
       const bx = x + (w - barsW) / 2;
-      const by = y + INNER;
+      // Centre the symbol in whatever space is left rather than pinning it to
+      // the top, so the label reads the same whatever the description length.
+      const blockH = barH + digitsH + warnH;
+      const by = y + Math.max(INNER, (barcodeH - blockH) / 2);
 
       doc.setFillColor(0);
       for (let i = 0; i < bars.length; i += 1) {

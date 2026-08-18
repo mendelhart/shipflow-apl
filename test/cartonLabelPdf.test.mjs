@@ -8,7 +8,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildCartonLabelsPdf } from '../src/lib/cartonLabelPdf.js';
+import { buildCartonLabelsPdf, barcodeGeometry } from '../src/lib/cartonLabelPdf.js';
+import { QUIET_MODULES } from '../src/domain/upc.js';
 import { normalizeUpc, encodeUpcBars } from '../src/domain/upc.js';
 
 const po = {
@@ -95,4 +96,44 @@ test('a stored UPC with a bad check digit is flagged, not silently printed', () 
   assert.equal(checkMismatch, true);
   assert.equal(providedCheck, 9);
   assert.equal(code, '628693015028', 'prints the corrected code');
+});
+
+/* ---- Barcode geometry (GS1 UPC-A) ---------------------------------- */
+
+test('the barcode keeps the UPC-A aspect ratio instead of filling the space', () => {
+  // The defect: module width was pinned at 2pt and bar height was "whatever is
+  // left on the page", so the same barcode came out a different shape on every
+  // label depending on how long the product description was.
+  const tall = barcodeGeometry({ availW: 267, availH: 300 });
+  const short = barcodeGeometry({ availW: 267, availH: 160 });
+  assert.equal(
+    (tall.barH / tall.barsW).toFixed(4),
+    (short.barH / short.barsW).toFixed(4),
+    'proportions must not depend on leftover page space'
+  );
+});
+
+test('magnification stays inside the 0.8x-2.0x GS1 permits', () => {
+  // 2.14x is what the old flat 2pt module produced on a 4in label — printers
+  // and verifiers reject that.
+  for (const availH of [120, 200, 300, 1000]) {
+    const g = barcodeGeometry({ availW: 267, availH });
+    assert.ok(g.inSpec, `${g.mag}x out of spec at availH=${availH}`);
+    assert.ok(g.mag <= 2.0);
+  }
+});
+
+test('the symbol never overflows the space it was given', () => {
+  for (const [availW, availH] of [[267, 300], [120, 300], [267, 90], [80, 60]]) {
+    const g = barcodeGeometry({ availW, availH });
+    const totalW = g.barsW + QUIET_MODULES * 2 * g.moduleW;
+    assert.ok(totalW <= availW + 1e-9, `overflows width at ${availW}x${availH}`);
+    assert.ok(g.barH <= availH + 1e-9, `overflows height at ${availW}x${availH}`);
+  }
+});
+
+test('a 4x6 label lands on the intended 1.8x magnification', () => {
+  const g = barcodeGeometry({ availW: 267, availH: 200 });
+  assert.equal(Number(g.mag.toFixed(2)), 1.8);
+  assert.equal(Number((g.barsW / 72).toFixed(2)), 2.22); // inches of bars
 });
