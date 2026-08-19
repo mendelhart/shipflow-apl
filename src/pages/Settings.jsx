@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { base44 } from "@/api/base44Client";
 import { uploadFile } from "@/lib/aiClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Upload, Save, LogOut, Palette, Building2, User, ImageIcon, Mail, Eye, EyeOff, Cpu } from "lucide-react";
+import { ArrowLeft, Upload, Save, LogOut, Palette, Building2, User, ImageIcon, Mail } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,6 @@ import { friendlyErrorMessage } from "@/lib/errors";
 const TABS = [
   { id: "company", label: "Company Info", icon: Building2 },
   { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "ai", label: "Gemini API", icon: Cpu },
   { id: "email", label: "Email", icon: Mail },
   { id: "account", label: "Account", icon: User },
 ];
@@ -36,7 +35,6 @@ const DEFAULT_SETTINGS = {
   card_background_color: "#ffffff",
   text_color: "#111827",
   secondary_text_color: "#6b7280",
-  mailgun_api_key: "",
   mailgun_domain: "",
   mailgun_from_email: "",
   mailgun_from_name: "Shipping Hub",
@@ -68,8 +66,8 @@ export default function Settings() {
   const [logoUploading, setLogoUploading] = useState(false);
   const [logoError, setLogoError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [user, setUser] = useState(null);
-  const [showApiKey, setShowApiKey] = useState(false);
   const [testEmailAddress, setTestEmailAddress] = useState("");
   const [testEmailStatus, setTestEmailStatus] = useState(null);
 
@@ -98,11 +96,25 @@ export default function Settings() {
   }, [settingsList]);
 
   const saveMutation = useMutation({
-    mutationFn: (data) =>
-      settingsId
-        ? base44.entities.AppSettings.update(settingsId, data)
-        : base44.entities.AppSettings.create(data),
+    // Send only keys this page owns. `form` is seeded from the server row, so
+    // it also carries id/created_at/updated_at, and it used to carry
+    // mailgun_api_key — a column that no longer exists. PostgREST rejects the
+    // whole PATCH on one unknown column, so a single stale key silently broke
+    // saving every other setting on the page.
+    mutationFn: (data) => {
+      const payload = {};
+      for (const key of Object.keys(DEFAULT_SETTINGS)) payload[key] = data[key];
+      return settingsId
+        ? base44.entities.AppSettings.update(settingsId, payload)
+        : base44.entities.AppSettings.create(payload);
+    },
+    onError: (err) => {
+      // Previously absent: a failed save just put the button back to "Save"
+      // with no message, so it looked identical to a successful one.
+      setSaveError(friendlyErrorMessage(err, "Could not save settings."));
+    },
     onSuccess: (result) => {
+      setSaveError("");
       if (!settingsId && result?.id) setSettingsId(result.id);
       // FIX: React Query v5's invalidateQueries takes a filters OBJECT, not
       // a bare array. The old `qc.invalidateQueries(["appsettings"])` call
@@ -166,13 +178,21 @@ export default function Settings() {
         <h1 className="text-xl font-bold text-gray-900 flex-1">Settings</h1>
         <Button
           size="sm"
-          onClick={() => saveMutation.mutate(form)}
+          onClick={() => { setSaveError(""); saveMutation.mutate(form); }}
           disabled={saveMutation.isPending}
           className={saved ? "bg-green-600 hover:bg-green-700" : ""}
         >
           {saveMutation.isPending ? "Saving..." : saved ? "✓ Saved" : <><Save className="w-3 h-3 mr-1" />Save</>}
         </Button>
       </div>
+
+      {saveError && (
+        <div className="max-w-3xl mx-auto px-6 pt-4">
+          <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {saveError}
+          </div>
+        </div>
+      )}
 
       <div className="max-w-3xl mx-auto p-6 flex gap-6">
         {/* Sidebar Tabs */}
@@ -369,34 +389,6 @@ export default function Settings() {
             </>
           )}
 
-          {/* AI Provider */}
-          {activeTab === "ai" && (
-            <>
-              <h2 className="font-semibold text-gray-800 text-base">AI document parsing</h2>
-              <p className="text-xs text-gray-500 -mt-3">
-                Customer Documents, Commercial Invoice and TJX Canada use Google Gemini to read
-                uploaded PDFs.
-              </p>
-
-              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 space-y-2">
-                <p className="text-xs text-slate-700">
-                  <span className="font-medium">The API key is now held on the server.</span>{" "}
-                  It used to be stored in this browser, where any script on the page could read it
-                  and it could not be rotated centrally. Requests now go through the{" "}
-                  <code className="text-[11px] bg-white px-1 py-0.5 rounded border">llm</code>{" "}
-                  Edge Function, which keeps the key server-side and rate-limits per user.
-                </p>
-                <p className="text-xs text-slate-600">
-                  To set or rotate it:
-                </p>
-                <pre className="text-[11px] bg-white border rounded p-2 overflow-x-auto">supabase secrets set GEMINI_API_KEY=...</pre>
-                <p className="text-xs text-amber-700">
-                  If a key was previously saved here, treat it as compromised and rotate it.
-                </p>
-              </div>
-            </>
-          )}
-
           {/* Email */}
           {activeTab === "email" && (
             <>
@@ -405,37 +397,31 @@ export default function Settings() {
                 Uses <a href="https://mailgun.com" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">Mailgun</a> to send emails.
               </p>
 
-              {/* Mailgun Credentials */}
+              {/* Sender identity. The API key and sending domain are Edge
+                  Function secrets (MAILGUN_API_KEY / MAILGUN_DOMAIN) and were
+                  removed from this page: the inputs wrote to app_settings,
+                  which the send path stopped reading, so anything typed here
+                  had no effect. `mailgun_api_key` no longer exists as a column
+                  at all, which meant every Save on this page failed with a
+                  PostgREST 400 — silently, because there was no error handler. */}
               <div className="bg-gray-50 rounded-lg p-4 space-y-4">
-                <h3 className="font-medium text-gray-700 text-sm">Mailgun Credentials</h3>
-                <div>
-                  <Label className="text-xs">API Key</Label>
-                  <div className="relative mt-1">
-                    <Input
-                      type={showApiKey ? "text" : "password"}
-                      value={form.mailgun_api_key}
-                      onChange={f("mailgun_api_key")}
-                      placeholder="key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                      className="h-8 text-sm pr-9"
-                    />
-                    <button type="button" onClick={() => setShowApiKey(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1">Find this in your <a href="https://app.mailgun.com/mg/dashboard" target="_blank" rel="noopener noreferrer" className="text-blue-500">Mailgun dashboard</a> under API Keys.</p>
-                </div>
-                <div>
-                  <Label className="text-xs">Sending Domain</Label>
-                  <Input value={form.mailgun_domain} onChange={f("mailgun_domain")} placeholder="mg.yourdomain.com" className="h-8 text-sm mt-1" />
+                <h3 className="font-medium text-gray-700 text-sm">Sender</h3>
+                <div className="rounded-md border border-slate-200 bg-white p-3">
+                  <p className="text-xs text-slate-700">
+                    The Mailgun API key and sending domain are held server-side as Edge
+                    Function secrets, not here. To rotate them:
+                  </p>
+                  <pre className="text-[11px] bg-slate-50 border rounded p-2 mt-2 overflow-x-auto">supabase secrets set MAILGUN_API_KEY=... MAILGUN_DOMAIN=...</pre>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <Label className="text-xs">From Email</Label>
-                    <Input value={form.mailgun_from_email} onChange={f("mailgun_from_email")} placeholder="invoices@yourdomain.com" className="h-8 text-sm mt-1" />
+                    <Input value={form.mailgun_from_email} onChange={f("mailgun_from_email")} placeholder="mhart@capitalnutrition.ca" className="h-8 text-sm mt-1" />
+                    <p className="text-xs text-gray-400 mt-1">Also used as Reply-To on every message.</p>
                   </div>
                   <div>
                     <Label className="text-xs">From Name</Label>
-                    <Input value={form.mailgun_from_name} onChange={f("mailgun_from_name")} placeholder="Shipping Hub" className="h-8 text-sm mt-1" />
+                    <Input value={form.mailgun_from_name} onChange={f("mailgun_from_name")} placeholder="Capital Nutrition" className="h-8 text-sm mt-1" />
                   </div>
                 </div>
                 <div>

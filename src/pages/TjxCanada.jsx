@@ -12,6 +12,8 @@ import { Label } from '@/components/ui/label';
 import { PDFDocument } from 'pdf-lib';
 import JSZip from 'jszip';
 import { friendlyErrorMessage } from "@/lib/errors";
+import { downloadBatchEml } from "@/lib/emailDocs";
+import { renderEmailHtml, DEFAULT_FROM_EMAIL } from "@/lib/emailHtml";
 
 // ============================================================================
 // Inlined former backend logic — runs client-side because backend functions
@@ -355,7 +357,7 @@ async function compressPdf(bytes) {
  * Returns an array of:
  *   { id, to, subject, body, poNumbers, fileNames, totalBytes, zipBlob }
  */
-async function buildEmailBatches({ attachments, to, subjectTemplate, bodyTemplate, companyName, fromEmail }) {
+async function buildEmailBatches({ attachments, to, subjectTemplate, bodyTemplate, companyName, fromEmail, logoUrl = '' }) {
   // Step 1: fetch + compress everything, keep the PO number alongside each file.
   const compressedFiles = [];
   for (const att of attachments) {
@@ -415,9 +417,10 @@ async function buildEmailBatches({ attachments, to, subjectTemplate, bodyTemplat
       return {
         id: `batch-${i}`,
         to,
-        from: fromEmail,
+        from: fromEmail || DEFAULT_FROM_EMAIL,
         subject,
         body,
+        html: renderEmailHtml({ body, logoUrl, companyName }),
         poNumbers,
         fileNames: batchFiles.map((f) => f.filename),
         files: batchFiles.map((f) => ({ filename: f.filename, bytes: f.bytes })), // needed to build the .eml
@@ -456,62 +459,7 @@ function downloadBatchZipAndOpenMailDraft(batch) {
 // manual re-attaching needed. (Doesn't apply to Gmail-web-only setups with no
 // desktop mail client — the zip+mailto option above still covers that case.)
 
-function wrapBase64(base64) {
-  return base64.match(/.{1,76}/g).join('\r\n');
-}
 
-function buildEmlBlob({ from, to, subject, body, files }) {
-  const boundary = `----invoice-${Date.now().toString(36)}`;
-  const crlfBody = body.replace(/\n/g, '\r\n');
-
-  let eml = '';
-  eml += `From: ${from}\r\n`;
-  eml += `To: ${to}\r\n`;
-  eml += `Subject: ${subject}\r\n`;
-  // Tells (Windows desktop) Outlook to open this .eml as an editable,
-  // unsent draft with a visible Send button — without this, double-clicking
-  // a .eml normally opens it read-only, styled like a message you received,
-  // which isn't something you can just hit Send on.
-  eml += `X-Unsent: 1\r\n`;
-  eml += `MIME-Version: 1.0\r\n`;
-  eml += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n`;
-  eml += `\r\n`;
-  eml += `--${boundary}\r\n`;
-  eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: 7bit\r\n`;
-  eml += `\r\n`;
-  eml += `${crlfBody}\r\n`;
-  eml += `\r\n`;
-
-  for (const f of files) {
-    const base64 = wrapBase64(uint8ToBase64(f.bytes));
-    eml += `--${boundary}\r\n`;
-    eml += `Content-Type: application/pdf; name="${f.filename}"\r\n`;
-    eml += `Content-Transfer-Encoding: base64\r\n`;
-    eml += `Content-Disposition: attachment; filename="${f.filename}"\r\n`;
-    eml += `\r\n`;
-    eml += `${base64}\r\n`;
-    eml += `\r\n`;
-  }
-
-  eml += `--${boundary}--\r\n`;
-
-  return new Blob([eml], { type: 'message/rfc822' });
-}
-
-function downloadBatchEml(batch) {
-  const emlBlob = buildEmlBlob({ from: batch.from, to: batch.to, subject: batch.subject, body: batch.body, files: batch.files });
-  const emlName = batch.zipName.replace(/\.zip$/, '.eml');
-  const emlUrl = URL.createObjectURL(emlBlob);
-  const a = document.createElement('a');
-  a.href = emlUrl;
-  a.download = emlName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(emlUrl), 10000);
-  return emlName;
-}
 
 
 
@@ -803,7 +751,8 @@ export default function TjxCanada() {
         subjectTemplate,
         bodyTemplate,
         companyName,
-        fromEmail: settings.invoice_from_email || 'mhart@capitalnutrition.ca',
+        fromEmail: settings.invoice_from_email || DEFAULT_FROM_EMAIL,
+        logoUrl: settings.logo_url || '',
       });
 
       // Show every email for review BEFORE any download or mail-client

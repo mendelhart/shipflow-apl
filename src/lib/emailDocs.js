@@ -13,7 +13,11 @@ import JSZip from "jszip";
 import { format } from "date-fns";
 import { formatPoNumber } from "@/utils/poNumber";
 import { HEADER_IMG, FOOTER_IMG, HEADER_FALLBACK, FOOTER_FALLBACK, loadBrandImage } from "@/domain/brandAssets";
-import { encodeHeader, encodeAddressHeader, encodeTextBody } from "@/lib/mimeHeaders";
+import { renderEmailHtml, DEFAULT_FROM_EMAIL } from "@/lib/emailHtml";
+// `downloadBatchEml` below calls buildEmlBlob, so it needs a local binding —
+// a bare `export ... from` re-export does not create one.
+import { buildEmlBlob } from "@/lib/emlBuilder";
+export { buildEmlBlob, uint8ToBase64 } from "@/lib/emlBuilder";
 
 const PAGE = { w: 612, h: 792, margin: 36 }; // US Letter, points
 const CONTENT_W = PAGE.w - PAGE.margin * 2;
@@ -640,14 +644,7 @@ export async function buildRepeatFdcPdf({ po, vendor }) {
 
 // ---- shared byte/base64 helpers --------------------------------------------
 
-export function uint8ToBase64(bytes) {
-  const CHUNK = 8192;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
-}
+
 
 // ---- error classification + status -----------------------------------------
 
@@ -676,7 +673,7 @@ export async function compressPdf(bytes) {
  * so batches aren't grouped by PO. subject/body stay identical across
  * batches aside from a "(i/n)" suffix and attachment-count note.
  */
-export async function buildEmailBatches({ files, to, from, subject, body }) {
+export async function buildEmailBatches({ files, to, from, subject, body, logoUrl = "", companyName }) {
   const compressedFiles = [];
   for (const f of files) {
     const before = f.bytes.length;
@@ -716,9 +713,10 @@ export async function buildEmailBatches({ files, to, from, subject, body }) {
       return {
         id: `batch-${i}`,
         to,
-        from,
+        from: from || DEFAULT_FROM_EMAIL,
         subject: batchSubject,
         body: batchBody,
+        html: renderEmailHtml({ body: batchBody, logoUrl, companyName }),
         fileNames: batchFiles.map((f) => f.filename),
         files: batchFiles,
         totalBytes,
@@ -747,50 +745,14 @@ export function downloadBatchZipAndOpenMailDraft(batch) {
 
 // ---- .eml builder (real attachments, opens as a ready-to-send draft) ------
 
-function wrapBase64(base64) {
-  // String.match returns null (not []) when there is no match, so an empty
-  // attachment threw "Cannot read properties of null" mid-send rather than
-  // producing an empty part.
-  return (String(base64 || "").match(/.{1,76}/g) || []).join("\r\n");
-}
-
-export function buildEmlBlob({ from, to, subject, body, files }) {
-  const boundary = `----shipping-docs-${Date.now().toString(36)}`;
-  const { encoding: bodyEncoding, body: crlfBody } = encodeTextBody(body);
-
-  let eml = "";
-  eml += `From: ${encodeAddressHeader(from)}\r\n`;
-  eml += `To: ${encodeAddressHeader(to)}\r\n`;
-  eml += `Subject: ${encodeHeader(subject)}\r\n`;
-  eml += `X-Unsent: 1\r\n`;
-  eml += `MIME-Version: 1.0\r\n`;
-  eml += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n`;
-  eml += `\r\n`;
-  eml += `--${boundary}\r\n`;
-  eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: ${bodyEncoding}\r\n`;
-  eml += `\r\n`;
-  eml += `${crlfBody}\r\n`;
-  eml += `\r\n`;
-
-  for (const f of files) {
-    const base64 = wrapBase64(uint8ToBase64(f.bytes));
-    eml += `--${boundary}\r\n`;
-    eml += `Content-Type: application/pdf; name="${f.filename}"\r\n`;
-    eml += `Content-Transfer-Encoding: base64\r\n`;
-    eml += `Content-Disposition: attachment; filename="${f.filename}"\r\n`;
-    eml += `\r\n`;
-    eml += `${base64}\r\n`;
-    eml += `\r\n`;
-  }
-
-  eml += `--${boundary}--\r\n`;
-
-  return new Blob([eml], { type: "message/rfc822" });
-}
+// .eml construction lives in @/lib/emlBuilder so it can be unit-tested
+// without dragging in jsPDF / pdf-lib. Re-exported here for existing callers.
 
 export function downloadBatchEml(batch) {
-  const emlBlob = buildEmlBlob({ from: batch.from, to: batch.to, subject: batch.subject, body: batch.body, files: batch.files });
+  const emlBlob = buildEmlBlob({
+    from: batch.from, to: batch.to, subject: batch.subject,
+    body: batch.body, html: batch.html, files: batch.files,
+  });
   const emlName = batch.zipName.replace(/\.zip$/, ".eml");
   const emlUrl = URL.createObjectURL(emlBlob);
   const a = document.createElement("a");

@@ -6,6 +6,12 @@ import { PDFDocument } from 'npm:pdf-lib@1.17.1';
 // Mailgun encodes attachments as base64 (~33% overhead), so limit raw bytes to 37MB → ~49MB encoded
 const MAX_BYTES = 37 * 1024 * 1024;
 
+// Kept in sync with src/lib/emailHtml.js — the client-side .eml (Outlook
+// draft) path uses the same sender and the same HTML shell, so a message
+// looks identical whichever route it goes out by.
+const DEFAULT_FROM_EMAIL = 'mhart@capitalnutrition.ca';
+const DEFAULT_FROM_NAME = 'Capital Nutrition';
+
 async function compressPdf(bytes) {
   try {
     const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
@@ -16,11 +22,15 @@ async function compressPdf(bytes) {
   }
 }
 
-async function sendEmail({ apiKey, domain, from, to, bcc, subject, body, htmlBody, files }) {
+async function sendEmail({ apiKey, domain, from, replyTo, to, bcc, subject, body, htmlBody, files }) {
   const formData = new FormData();
   formData.append('from', from);
   formData.append('to', to);
   if (bcc) formData.append('bcc', bcc);
+  // Mail is sent through mg.<domain> but addressed From the human mailbox, so
+  // without an explicit Reply-To a customer's reply goes to the Mailgun
+  // subdomain and is never read.
+  if (replyTo) formData.append('h:Reply-To', replyTo);
   formData.append('subject', subject);
   formData.append('text', body);
   formData.append('html', htmlBody);
@@ -80,8 +90,10 @@ serve(async (req) => {
     const domain = Deno.env.get('MAILGUN_DOMAIN') ?? s.mailgun_domain;
     // The sender is configuration, not caller input: accepting from_email
     // from the client let any user send mail as anyone at the company.
-    const finalFromEmail = s.mailgun_from_email || `noreply@${domain}`;
-    const finalFromName = s.mailgun_from_name || 'Shipping Hub';
+    // Falls back to the company mailbox rather than noreply@mg.<domain>:
+    // that address does not exist, so bounces and replies were black-holed.
+    const finalFromEmail = s.mailgun_from_email || DEFAULT_FROM_EMAIL;
+    const finalFromName = s.mailgun_from_name || DEFAULT_FROM_NAME;
 
     if (!apiKey) {
       throw new HttpError(
@@ -98,11 +110,20 @@ serve(async (req) => {
     // `body` and `logo_url` are user-controlled. Interpolated raw, they let a
     // user inject markup — a fake remittance block, or a broken img tag —
     // into mail that customers receive from the company's own domain.
-    const bodyHtml = escapeHtml(body).replace(/\n/g, '<br>');
-    const htmlBody = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:600px;">
-  <div style="line-height:1.6;">${bodyHtml}</div>
-  ${logoUrl ? `<div style="margin-top:32px;border-top:1px solid #e5e7eb;padding-top:16px;"><img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(companyName)}" style="max-height:48px;max-width:180px;object-fit:contain;" /></div>` : ''}
-</div>`;
+    const paragraphs = String(body)
+      .split(/\n{2,}/)
+      .map((block: string) => escapeHtml(block).replace(/\n/g, '<br>'))
+      .filter((block: string) => block.length > 0)
+      .map((block: string) => `<p style="margin:0 0 14px 0;">${block}</p>`)
+      .join('');
+    const htmlBody = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#ffffff;">
+<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#222222;max-width:600px;">
+${paragraphs}
+${logoUrl ? `<div style="margin-top:32px;border-top:1px solid #e5e7eb;padding-top:16px;"><img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(companyName)}" style="max-height:48px;max-width:180px;object-fit:contain;" /></div>` : ''}
+</div>
+</body></html>`;
     const from = `${finalFromName} <${finalFromEmail}>`;
 
     // Fetch all attachments (support both URL-based and base64-based)
@@ -170,7 +191,8 @@ serve(async (req) => {
         : htmlBody;
       try {
         const id = await sendEmail({
-          apiKey, domain, from, to: recipients.join(','), bcc: s.mailgun_bcc,
+          apiKey, domain, from, replyTo: finalFromEmail,
+          to: recipients.join(','), bcc: s.mailgun_bcc,
           subject: batchSubject, body: batchBody, htmlBody: batchHtml, files: batches[i],
         });
         ids.push(id);

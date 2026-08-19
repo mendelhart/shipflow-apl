@@ -11,7 +11,8 @@ import { Textarea } from "@/components/ui/textarea";
 import PrintWrapper from "@/components/shared/PrintWrapper";
 import { formatPoNumber } from "@/utils/poNumber";
 import CommercialInvoiceDoc from "@/components/documents/CommercialInvoiceDoc";
-import { buildCommercialInvoicePdf } from "@/lib/emailDocs";
+import { buildCommercialInvoicePdf, downloadBatchEml } from "@/lib/emailDocs";
+import { renderEmailHtml, DEFAULT_FROM_EMAIL } from "@/lib/emailHtml";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
 import { PDFDocument } from "pdf-lib";
 import JSZip from "jszip";
@@ -75,7 +76,7 @@ async function compressPdf(bytes) {
  * regenerating subject/body per batch from templates so each batch's PO
  * list only reflects what's actually in that batch.
  */
-async function buildEmailBatches({ files, to, subjectTemplate, bodyTemplate, companyName, fromEmail }) {
+async function buildEmailBatches({ files, to, subjectTemplate, bodyTemplate, companyName, fromEmail, logoUrl = "" }) {
   const compressedFiles = [];
   for (const f of files) {
     const before = f.bytes.length;
@@ -122,9 +123,10 @@ async function buildEmailBatches({ files, to, subjectTemplate, bodyTemplate, com
       return {
         id: `batch-${i}`,
         to,
-        from: fromEmail,
+        from: fromEmail || DEFAULT_FROM_EMAIL,
         subject,
         body,
+        html: renderEmailHtml({ body, logoUrl, companyName }),
         poNumbers,
         fileNames: batchFiles.map((f) => f.filename),
         files: batchFiles.map((f) => ({ filename: f.filename, bytes: f.bytes })),
@@ -153,64 +155,6 @@ function downloadBatchZipAndOpenMailDraft(batch) {
 }
 
 // ---- .eml builder (real attachments, opens as a ready-to-send draft) ------
-
-function wrapBase64(base64) {
-  // String.match returns null (not []) when there is no match, so an empty
-  // attachment threw "Cannot read properties of null" mid-send rather than
-  // producing an empty part.
-  return (String(base64 || "").match(/.{1,76}/g) || []).join("\r\n");
-}
-
-function buildEmlBlob({ from, to, subject, body, files }) {
-  const boundary = `----invoice-${Date.now().toString(36)}`;
-  const crlfBody = body.replace(/\n/g, "\r\n");
-
-  let eml = "";
-  eml += `From: ${from}\r\n`;
-  eml += `To: ${to}\r\n`;
-  eml += `Subject: ${subject}\r\n`;
-  // Tells (Windows desktop) Outlook to open this .eml as an editable,
-  // unsent draft with a visible Send button — without this, double-clicking
-  // a .eml normally opens read-only, styled like a message you received.
-  eml += `X-Unsent: 1\r\n`;
-  eml += `MIME-Version: 1.0\r\n`;
-  eml += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n`;
-  eml += `\r\n`;
-  eml += `--${boundary}\r\n`;
-  eml += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  eml += `Content-Transfer-Encoding: 7bit\r\n`;
-  eml += `\r\n`;
-  eml += `${crlfBody}\r\n`;
-  eml += `\r\n`;
-
-  for (const f of files) {
-    const base64 = wrapBase64(uint8ToBase64(f.bytes));
-    eml += `--${boundary}\r\n`;
-    eml += `Content-Type: application/pdf; name="${f.filename}"\r\n`;
-    eml += `Content-Transfer-Encoding: base64\r\n`;
-    eml += `Content-Disposition: attachment; filename="${f.filename}"\r\n`;
-    eml += `\r\n`;
-    eml += `${base64}\r\n`;
-    eml += `\r\n`;
-  }
-
-  eml += `--${boundary}--\r\n`;
-
-  return new Blob([eml], { type: "message/rfc822" });
-}
-
-function downloadBatchEml(batch) {
-  const emlBlob = buildEmlBlob({ from: batch.from, to: batch.to, subject: batch.subject, body: batch.body, files: batch.files });
-  const emlName = batch.zipName.replace(/\.zip$/, ".eml");
-  const emlUrl = URL.createObjectURL(emlBlob);
-  const a = document.createElement("a");
-  a.href = emlUrl;
-  a.download = emlName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(emlUrl), 10000);
-}
 
 // ============================================================================
 // Component
@@ -322,7 +266,10 @@ export default function Invoices() {
         subjectTemplate: europeSubjectTpl,
         bodyTemplate: europeBodyTpl,
         companyName: settings.company_name || "Shipping Hub",
-        fromEmail: "mhart@capitalnutrition.ca",
+        // This page emails TJX *Europe*; invoice_from_email is the TJX Canada
+        // override and was the wrong knob. Previously hardcoded outright.
+        fromEmail: settings.tjx_europe_from_email || DEFAULT_FROM_EMAIL,
+        logoUrl: settings.logo_url || "",
       });
 
       setProcessedBatchIds(new Set());

@@ -18,6 +18,7 @@ import {
   friendlyErrorMessage,
   bumpStatus,
 } from "@/lib/emailDocs";
+import { DEFAULT_FROM_EMAIL } from "@/lib/emailHtml";
 
 // TJX Europe billing flow — generates the same real vector-PDF commercial
 // invoices (and optional packing lists) as the APL Logistics dialog, then
@@ -164,9 +165,13 @@ export default function EmailTjxEuropeDialog({ open, onClose, selectedPos, vendo
       const batches = await buildEmailBatches({
         files,
         to: emailTo,
-        from: europeFromEmail || (europeFromName ? `${europeFromName} <no-reply@shippinghub.app>` : "no-reply@shippinghub.app"),
+        // no-reply@shippinghub.app was a placeholder domain nobody owns:
+        // any reply bounced, and the address failed SPF outright.
+        from: europeFromEmail || DEFAULT_FROM_EMAIL,
         subject,
         body,
+        logoUrl: settings.logo_url || "",
+        companyName: settings.company_name || undefined,
       });
 
       setProcessedBatchIds(new Set());

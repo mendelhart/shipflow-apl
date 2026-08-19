@@ -20,6 +20,7 @@ import {
   friendlyErrorMessage,
   bumpStatus,
 } from "@/lib/emailDocs";
+import { DEFAULT_FROM_EMAIL } from "@/lib/emailHtml";
 
 const DOC_TYPES = [
   { id: "invoice", label: "Commercial Invoice" },
@@ -214,7 +215,15 @@ export default function EmailAplDialog({ open, onClose, selectedPos, vendors = [
       const files = await generateAllFiles();
 
       setProgressLabel("Preparing email draft(s)…");
-      const batches = await buildEmailBatches({ files, to: emailTo, from: aplFromEmail || "mhart@capitalnutrition.ca", subject, body });
+      const batches = await buildEmailBatches({
+        files,
+        to: emailTo,
+        from: aplFromEmail || DEFAULT_FROM_EMAIL,
+        subject,
+        body,
+        logoUrl: settings.logo_url || "",
+        companyName: settings.company_name || undefined,
+      });
 
       // Show every email for review BEFORE any download or mail-client
       // action happens — nothing is sent yet at this point. This path
