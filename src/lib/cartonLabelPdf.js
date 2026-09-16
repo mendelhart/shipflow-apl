@@ -238,11 +238,11 @@ function drawLabel(doc, { po, item, boxNumber, totalBoxes }) {
  * Build the full label set for a PO.
  * Returns a jsPDF document; the caller decides whether to save or print it.
  */
-export async function buildCartonLabelsPdf({ po, startBox = 1, onProgress }) {
+export async function buildCartonLabelsPdf({ po, onProgress }) {
   const { jsPDF } = await import('jspdf');
   const doc = new jsPDF({ unit: 'pt', format: [PAGE_W, PAGE_H], orientation: 'portrait' });
 
-  const { plan, total } = labelPlan(po, startBox);
+  const { plan, total } = labelPlan(po);
   if (total === 0) {
     throw new Error('This purchase order has no cartons to label.');
   }
@@ -295,12 +295,10 @@ export async function buildCartonLabelsPdf({ po, startBox = 1, onProgress }) {
 
   let printed = 0;
   let first = true;
-  // Box numbers run across the WHOLE purchase order, not per line item.
-  // Previously `boxNumber` restarted at `startBox` for every item and
-  // `totalBoxes` was that item's carton count, so a 2-item PO produced
-  // "1 of 3, 2 of 3, 3 of 3, 1 of 2, 2 of 2" — two physically different cartons
-  // both labelled Box 1, and no label stating the real shipment total.
-  let boxNumber = startBox;
+  // Box numbers restart for each line item (flavour): a PO with 12 Vanilla and
+  // 8 Chocolate cartons prints "Box 1 of 12" … "Box 12 of 12", then
+  // "Box 1 of 8" … "Box 8 of 8". The ITEM field and description on the same
+  // label tell two "Box 1" cartons apart.
   for (const { item, cartons } of plan) {
     for (let i = 0; i < cartons; i += 1) {
       if (!first) doc.addPage([PAGE_W, PAGE_H], 'portrait');
@@ -308,10 +306,9 @@ export async function buildCartonLabelsPdf({ po, startBox = 1, onProgress }) {
       drawLabel(doc, {
         po,
         item,
-        boxNumber,
-        totalBoxes: startBox - 1 + total,
+        boxNumber: i + 1,
+        totalBoxes: cartons,
       });
-      boxNumber += 1;
       printed += 1;
       if (onProgress && printed % 50 === 0) {
         onProgress(printed, total);
