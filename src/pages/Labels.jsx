@@ -4,8 +4,6 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Printer, Download } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import CartonLabel from "@/components/documents/CartonLabel";
 import { formatPoNumber } from "@/utils/poNumber";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
@@ -20,7 +18,6 @@ export default function Labels() {
 
   const [pdfProgress, setPdfProgress] = useState(null);
   const [pdfError, setPdfError] = useState(null);
-  const [startBox, setStartBox] = useState(1);
 
   const { data: pos = [] } = useQuery({
     queryKey: ["pos"],
@@ -38,7 +35,7 @@ export default function Labels() {
     ? vendors.find(v => v.id === po.vendor_id)
     : null;
 
-  const { plan: labelPlanItems, total: totalCartons } = labelPlan(po || {}, startBox);
+  const { plan: labelPlanItems, total: totalCartons } = labelPlan(po || {});
   const palletCount = parseInt(po?.total_pallets) || 0;
 
   // Both buttons build the SAME document. Previously "Print" used the DOM and
@@ -51,7 +48,6 @@ export default function Labels() {
     try {
       const { doc } = await buildCartonLabelsPdf({
         po,
-        startBox,
         onProgress: (done, total) => setPdfProgress({ done, total }),
       });
       return doc;
@@ -115,15 +111,6 @@ export default function Labels() {
         </h1>
 
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1">
-            <Label className="text-xs">Start box</Label>
-            <Input
-              type="number"
-              value={startBox}
-              onChange={e => setStartBox(parseInt(e.target.value) || 1)}
-              className="h-8 w-16"
-            />
-          </div>
           <Button size="sm" onClick={handleDownload} disabled={!po || !!pdfProgress}>
             <Download className="w-4 h-4 mr-1" />
             {pdfProgress
@@ -165,8 +152,8 @@ export default function Labels() {
                 <span className="font-medium">
                   {totalCartons.toLocaleString()} label{totalCartons === 1 ? "" : "s"}
                 </span>{" "}
-                will be produced — one per carton, numbered {startBox} to {startBox - 1 + totalCartons}
-                {" "}across the whole PO.
+                will be produced — one per carton, numbered separately for each
+                item (Box 1 of N, where N is that item's carton count).
               </div>
               <div className="text-xs text-slate-500">
                 Preview shows one sample per item
@@ -228,7 +215,7 @@ export default function Labels() {
                       po={po}
                       vendor={vendor}
                       item={item}
-                      boxNumber={startBox}
+                      boxNumber={1}
                       totalBoxes={cartons}
                     />
                   </div>
