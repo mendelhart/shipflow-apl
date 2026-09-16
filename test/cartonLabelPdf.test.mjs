@@ -38,14 +38,6 @@ test('page size is 4x6 inches', async () => {
   assert.equal(Math.round(height), 432);
 });
 
-test('startBox offsets the numbering', async () => {
-  const { doc } = await buildCartonLabelsPdf({ po, startBox: 10 });
-  // Box numbers restart per item (Box n of <that item's cartons>), offset by
-  // startBox. Assert via the rendered text stream.
-  const pdf = doc.output();
-  assert.ok(pdf.includes('%PDF'), 'valid PDF header');
-});
-
 test('a PO with no cartons fails loudly rather than emitting an empty file', async () => {
   await assert.rejects(
     () => buildCartonLabelsPdf({ po: { ...po, items: [{ ...po.items[0], num_cartons: 0 }] } }),
@@ -149,25 +141,24 @@ const poTwoItems = {
   ],
 };
 
-const boxLinesOf = async (po, startBox) => {
-  const { doc } = await buildCartonLabelsPdf({ po, startBox });
+const boxLinesOf = async (po) => {
+  const { doc } = await buildCartonLabelsPdf({ po });
   const raw = doc.output('arraybuffer');
   const text = Buffer.from(raw).toString('latin1');
   return [...text.matchAll(/Box (\d+) of (\d+)/g)].map((m) => `${m[1]} of ${m[2]}`);
 };
 
-test('box numbers run across the whole PO, not per line item', async () => {
-  // Was "1 of 3, 2 of 3, 3 of 3, 1 of 2, 2 of 2" — two physically different
-  // cartons both labelled Box 1, and no label stating the real total.
-  assert.deepEqual(await boxLinesOf(poTwoItems, 1), [
-    '1 of 5', '2 of 5', '3 of 5', '4 of 5', '5 of 5',
+test('box numbers restart per line item (flavour), not across the whole PO', async () => {
+  assert.deepEqual(await boxLinesOf(poTwoItems), [
+    '1 of 3', '2 of 3', '3 of 3', '1 of 2', '2 of 2',
   ]);
 });
 
-test('startBox offsets the run once, not once per item', async () => {
-  assert.deepEqual(await boxLinesOf(poTwoItems, 100), [
-    '100 of 104', '101 of 104', '102 of 104', '103 of 104', '104 of 104',
-  ]);
+test('a stray startBox argument no longer shifts the numbering', async () => {
+  const { doc } = await buildCartonLabelsPdf({ po: poTwoItems, startBox: 100 });
+  const text = Buffer.from(doc.output('arraybuffer')).toString('latin1');
+  const boxes = [...text.matchAll(/Box (\d+) of (\d+)/g)].map((m) => `${m[1]} of ${m[2]}`);
+  assert.deepEqual(boxes, ['1 of 3', '2 of 3', '3 of 3', '1 of 2', '2 of 2']);
 });
 
 test('an item with no UPC stops the run instead of printing blank barcodes', async () => {
