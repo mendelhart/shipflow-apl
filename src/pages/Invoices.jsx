@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import PrintWrapper from "@/components/shared/PrintWrapper";
+import VectorPdfButton from "@/components/shared/VectorPdfButton";
 import { formatPoNumber } from "@/utils/poNumber";
 import CommercialInvoiceDoc from "@/components/documents/CommercialInvoiceDoc";
 import { buildCommercialInvoicePdf, downloadBatchEml } from "@/lib/emailDocs";
@@ -398,7 +399,17 @@ export default function Invoices() {
             </div>
           );
           return (
-            <PrintWrapper key={po.id} title={`Commercial_Invoice_${po.po_prefix}_${po.po_number}`} showPdf contentId={`inv-${po.id}`}>
+            <PrintWrapper
+              key={po.id}
+              title={`Commercial_Invoice_${po.po_prefix}_${po.po_number}`}
+              contentId={`inv-${po.id}`}
+              extraActions={
+                <VectorPdfButton
+                  buildFn={() => buildCommercialInvoicePdf({ po, vendor, customsId: settings.customs_id, settingsExporterName: settings.exporter_name, settingsExporterTitle: settings.exporter_title })}
+                  filename={`Commercial_Invoice_${po.po_prefix}_${po.po_number}.pdf`}
+                />
+              }
+            >
               <CommercialInvoiceDoc po={po} vendor={vendor} settings={settings} />
             </PrintWrapper>
           );

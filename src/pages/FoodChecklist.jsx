@@ -5,8 +5,10 @@ import { ArrowLeft, Printer } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import PrintWrapper from "@/components/shared/PrintWrapper";
+import VectorPdfButton from "@/components/shared/VectorPdfButton";
 import { formatPoNumber } from "@/utils/poNumber";
 import FoodChecklistDoc, { RepeatVendorApprovalDoc } from "@/components/documents/FoodChecklistDoc";
+import { buildFdcPdf, buildRepeatFdcPdf } from "@/lib/emailDocs";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
 import FdcAiPanel from "@/components/foodchecklist/FdcAiPanel";
 
@@ -108,7 +110,19 @@ export default function FoodChecklist() {
           const safeVendor = docMode === "repeat" ? CAPITAL_NUTRITION_VENDOR : vendor;
           const safeTitle = `${docMode === "repeat" ? "RepeatFDC" : "FDC"}_${po.po_prefix}_${po.po_number}`.replace(/\s+/g, "_");
           return (
-            <PrintWrapper key={po.id} title={safeTitle} showPdf contentId={`fdc-${po.id}`}>
+            <PrintWrapper
+              key={po.id}
+              title={safeTitle}
+              contentId={`fdc-${po.id}`}
+              extraActions={
+                <VectorPdfButton
+                  buildFn={() => docMode === "fdc"
+                    ? buildFdcPdf({ po, vendor: safeVendor, products })
+                    : buildRepeatFdcPdf({ po, vendor: safeVendor })}
+                  filename={`${safeTitle}.pdf`}
+                />
+              }
+            >
               {docMode === "fdc"
                 ? <FoodChecklistDoc po={po} vendor={safeVendor} products={products} />
                 : <RepeatVendorApprovalDoc po={po} vendor={safeVendor} />

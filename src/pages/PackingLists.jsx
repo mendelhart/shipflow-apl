@@ -5,7 +5,9 @@ import { ArrowLeft, Printer } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import PrintWrapper from "@/components/shared/PrintWrapper";
+import VectorPdfButton from "@/components/shared/VectorPdfButton";
 import PackingListDoc from "@/components/documents/PackingListDoc";
+import { buildPackingListPdf } from "@/lib/emailDocs";
 import POGroupedSelector from "@/components/shared/POGroupedSelector";
 
 export default function PackingLists() {
@@ -67,7 +69,17 @@ export default function PackingLists() {
             </div>
           );
           return (
-            <PrintWrapper key={po.id} title={`Packing_List_${po.po_prefix}_${po.po_number}`} showPdf contentId={`pl-${po.id}`}>
+            <PrintWrapper
+              key={po.id}
+              title={`Packing_List_${po.po_prefix}_${po.po_number}`}
+              contentId={`pl-${po.id}`}
+              extraActions={
+                <VectorPdfButton
+                  buildFn={() => buildPackingListPdf({ po, vendor })}
+                  filename={`Packing_List_${po.po_prefix}_${po.po_number}.pdf`}
+                />
+              }
+            >
               <PackingListDoc po={po} vendor={vendor} />
             </PrintWrapper>
           );
