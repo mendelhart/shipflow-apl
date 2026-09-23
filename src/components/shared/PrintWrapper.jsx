@@ -2,8 +2,11 @@ import { Printer, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import PdfDownloadButton from "@/components/shared/PdfDownloadButton";
 
-// contentId can be passed explicitly (for multi-doc pages); defaults to unique slug from title
-export default function PrintWrapper({ children, title, showPdf = false, contentId }) {
+// contentId can be passed explicitly (for multi-doc pages); defaults to unique slug from title.
+// extraActions renders additional buttons alongside Print/Open in New Window — used to swap in
+// a VectorPdfButton (real vector PDF, no screenshot quality ceiling) instead of showPdf's
+// html2canvas-based PdfDownloadButton, for document types that have a vector builder available.
+export default function PrintWrapper({ children, title, showPdf = false, contentId, extraActions }) {
   const id = contentId || ("pw-" + title.replace(/[^a-zA-Z0-9]/g, "_"));
 
   const getHtml = () => {
@@ -19,10 +22,11 @@ export default function PrintWrapper({ children, title, showPdf = false, content
 
   return (
     <div>
-      <div className="flex gap-2 mb-4 no-print">
+      <div className="flex gap-2 mb-4 no-print items-center flex-wrap">
         <Button variant="outline" size="sm" onClick={() => window.print()}><Printer className="w-4 h-4 mr-1" />Print</Button>
         <Button variant="outline" size="sm" onClick={handleNewWindow}><ExternalLink className="w-4 h-4 mr-1" />Open in New Window</Button>
         {showPdf && <PdfDownloadButton contentId={id} title={title} />}
+        {extraActions}
       </div>
       <div id={id}>
         {children}
