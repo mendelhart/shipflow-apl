@@ -12,5 +12,6 @@ jobs:
         run: |
           curl -fsS "${{ secrets.SUPABASE_URL }}/rest/v1/app_settings?select=id&limit=1" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" > /dev/null
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Accept-Profile: public" > /dev/null
           echo "pinged $(date -u)"
